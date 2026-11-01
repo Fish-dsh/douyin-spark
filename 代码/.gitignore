@@ -1,0 +1,27 @@
+# 运行时文件
+runtime/
+runtime-dev/
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+.pytest_cache/
+
+# 配置 & 凭据
+.env
+config.json
+install.log
+
+# IDE / 工具
+.ruff_cache/
+.vscode/
+.idea/
+
+# 临时文件
+*.tmp
+
+# 工具状态目录(非项目代码; 板子实测有, 回流正源保持两机一致)
+.opencode/
+
+# 备份文件
+*.bak-*

@@ -1,0 +1,23 @@
+{
+  "send_window": {
+    "start": "23:30",
+    "end": "00:30"
+  },
+  "auto_login": true,
+  "block_resources": true,
+  "perf_profile": "low",
+  "browser_reuse": true,
+  "headless": false,
+  "display": ":99",
+  "self_heal": true,
+  "vision_fallback": true,
+  "vision_provider": "agnes",
+  "accounts": [
+    {
+      "name": "main",
+      "storage_file": "storage.json",
+      "state_file": "state.json"
+    }
+  ],
+  "notify_cmd": ""
+}

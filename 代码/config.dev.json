@@ -1,0 +1,7 @@
+{
+  "extends": "config.json",
+  "perf_profile": "high",
+  "headless": false,
+  "browser_reuse": true,
+  "display": null
+}

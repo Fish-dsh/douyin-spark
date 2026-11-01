@@ -1,0 +1,4 @@
+playwright==1.52.0
+ruff==0.16.8
+# Emergency Visual Fallback 定位层 (src/vision_cv.py); 未安装时该层自动降级放弃, 主链路不受影响
+opencv-python-headless==5.0.0.93
