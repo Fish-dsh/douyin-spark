@@ -245,7 +245,7 @@ def check_streak_history(account: str | None = None) -> tuple[list[str], str]:
     # 判据是**昨天自己有没有发漏**, 不是"今天新出现的火花昨天发过没"。
     # 老写法 `today_discovered - prev_sent` 会把「今天新形成的火花」(昨天压根不在
     # 待续名单里, 自然也不在昨天的 sent 里)一律判成漏发 → 每天必然误报一次,
-    # 每次都白烧一整轮旧 AI 自愈(2026-10-04: 丹/依旧/再過一個世紀 三个新火花触发
+    # 每次都白烧一整轮旧 AI 自愈(2026-10-04: FRIEND_M/FRIEND_L/FRIEND_E 三个新火花触发
     # streak_gap, 叠加引擎 429 共烧掉 16 分钟, 把账号 13800000001 挤出发送窗口)。
     # 昨天的 discovered(待续名单) − 昨天的 sent(实际发出) 才是真漏发。
     missing = list(prev_discovered - prev_sent)
