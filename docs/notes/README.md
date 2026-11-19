@@ -23,5 +23,6 @@
 | `ACCOUNT_B` / `ACCOUNT_C` / `TEST_PHONE` | 登录用的手机号 |
 | `FRIEND_A` … `FRIEND_M` | 好友昵称 |
 | `BOARD_SUBNET` | 板子所在网段 |
+| `DEVUSER` / `DEVUSER_OLD` | 本机与旧环境的用户名 |
 
 脱敏是脚本一次性替换的，语义没动，所以那些"某人一直发不出去""某人的面板打不开"的因果链仍然是完整的。
