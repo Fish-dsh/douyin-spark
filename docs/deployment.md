@@ -22,6 +22,8 @@
    ssh REMOTE 'git -C /opt/douyin-spark fetch -q /tmp/spark-mirror.bundle "refs/heads/main:refs/remotes/localsrc/main" && git -C /opt/douyin-spark merge --ff-only refs/remotes/localsrc/main && chown -R USER:GROUP /opt/douyin-spark'
    ```
    bundle 里**没有** `runtime/`（gitignored），这是对的 —— 登录态不该进版本历史。
+
+   > `merge --ff-only` 要求部署机的仓库和 bundle **有共同祖先**。照着本文档从 git 建立起来的部署机满足这个前提；但如果是「scp 一份快照 + `git init && git commit`」建起来的（见下面第 3 步的兜底做法），历史是完全独立的，`--ff-only` 会报 `not possible to fast-forward`。那种机器改用 `git fetch ... && git reset --hard refs/remotes/localsrc/main`，代价是丢掉部署机本地的提交（部署机本来就不该有本地提交）。实在不确定就先 `git -C /opt/douyin-spark log --oneline -1` 看它认不认识你本地的提交。
 3. **登录态**单独传，别跟代码搅在一起：
    ```bash
    ssh REMOTE 'mkdir -p /opt/douyin-spark/runtime && chmod 700 /opt/douyin-spark/runtime'
@@ -49,7 +51,9 @@ SPARK_HOST=USER@HOST ./tools/deploy.sh
 | `SPARK_REMOTE_DIR` | 远端部署目录，默认 `/opt/douyin-spark` |
 | `SPARK_REMOTE_USER` | 远端跑服务的用户（决定 `chown` 和跑冒烟的身份），默认取本地 `whoami` |
 
-它做的事，按顺序：打包（**排除** `.venv` / `runtime` / `__pycache__` / `.git` / `runtime-dev` / `*.log` / `config.json`）→ ssh 把远端当前代码与 `config.json` 备份到 `/tmp/spark-prev-<时间戳>.tgz` 和 `/tmp/spark-config-<时间戳>.json` → 上传解包并 `chown` → 远端跑冒烟（`load_config()` + `preflight()` + 打印账号名与 `notify_cmd` 是否配了 + `import src.scheduler`）→ 任一步失败自动回滚代码与配置。
+它做的事，按顺序：打包（**排除** `.venv` / `runtime` / `__pycache__` / `.git` / `runtime-dev` / `*.log` / `config.json` / **`.env`** / **`storage.json`** / `state.json` / `*.tgz`）→ **自检归档**（`tar -tzf` 列出内容，命中凭据类文件名就中止，不把密码传出去）→ ssh 把远端当前代码与 `config.json` 备份到 `/tmp/spark-prev-<时间戳>.tgz` 和 `/tmp/spark-config-<时间戳>.json` → 上传解包并 `chown` → 远端跑冒烟（`load_config()` + `preflight()` + 打印账号名与 `notify_cmd` 是否配了 + `import src.scheduler`）→ 任一步失败自动回滚代码与配置。
+
+打包为什么不靠 `.gitignore`：`tar` 不读那个文件。以前`.env`（人工登录密码）就在排除清单外——本机上没有正好没暴露，但换一台填了 `.env` 的机器跑一次推送，密码就跟着代码上了部署机。现在两条防线：`--exclude` 主动排除，加打包后的归档自检兜住"将来有人加了新凭据文件忘了排除"。
 
 为什么冒烟里要跑 `preflight()`：2026-11-02 那次事故就是手写 `tar` 把本地一个 19 字节的 `config.json` 桩打进去，覆盖掉部署机真正的配置 —— `accounts` 空着，整晚发 0 个好友却返回 `rc=0`，巡检判健康、告警通道也没配，静默断火一整晚。现在 `accounts` 空 / 条目缺 `name` 会抛 `ConfigError`，退出码 5。
 
@@ -61,12 +65,13 @@ SPARK_HOST=USER@HOST ./tools/deploy.sh
 
 1. 依赖（**分两步，只有第一步要 sudo**）：
    ```bash
-   python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
+   python3 -m venv .venv && .venv/bin/pip install -r requirements-vision.txt
    sudo .venv/bin/playwright install-deps chromium      # 系统库 apt 安装, 需要 root
    .venv/bin/playwright install chromium                # 浏览器本体, 装进当前用户家目录
    ```
+   这里用 `requirements-vision.txt`（= `requirements.txt` + opencv）是因为板子要跑视觉兜底的 CV 粗定位层。内存/磁盘更紧的机器可以只装 `requirements.txt`：没装 opencv 时 `src/vision_cv.py` 里 `cv2` 为 `None`，该层自动放弃，主链路不受影响。三份依赖的区别见 [development.md](development.md)。
    `install --with-deps chromium` 一步也能装完，但它会把「下载浏览器」也塞进 root 的 `~/.cache/ms-playwright`，之后普通用户跑 cron 反而找不到浏览器；上面两步分开就没有这个坑。
-2. 准备 `config.json`（自动发现、`send_window` 对齐 cron；`headless` 必须 `false`）。`engine` 字段已废弃，代码不读，别写。
+2. 准备 `config.json`（自动发现、`send_window` 对齐 cron）。**`headless` 必须 `false`、`display` 必须写 `:99`**：这两个不再只是"警告一下"，`preflight()` 会把它们当启动硬门禁——缺 `headless` 键、写 `true`、或者 `display` 写成 `:abc`/裸数字/路径，都会抛 `ConfigError` 并以**退出码 5** 拒绝运行。桌面临时调试要跑 headless，唯一出口是 `SPARK_ALLOW_HEADLESS=1`（cron 环境里没有这个变量）。`engine` 字段已废弃，代码不读，别写。
 3. **git 兜底**：项目已是 git 仓库。scp 整目录会带上 `.git`；若只传代码文件，部署机上执行 `git init && git add -A && git commit -m "chore: import"`。
 4. 部署机上配 cron：`crontab -e` 写入 `0 0 * * * /opt/douyin-spark/run_cron.sh`，并确保脚本可执行：`chmod +x /opt/douyin-spark/run_cron.sh && chown -R USER:GROUP /opt/douyin-spark`（**scp/覆盖更新脚本会丢 x 位，cron 调用将 Permission denied 且无日志，务必校验**）。
 5. **健康检查 cron**（堵静默失败，**晚于主任务最晚可能的收尾时刻**）：`45 1 * * * /opt/douyin-spark/.venv/bin/python /opt/douyin-spark/src/health_check.py --quiet --notify-only-on-change`（如需告警，先在 `config.json` 配 `notify_cmd`，见 `docs/operations.md`）。原为 `15 1`，2026-10-04 随 `timeout 45m → 90m` 推迟到 **01:45**。**"最晚 01:30 收尾"这个前提现在由 `run_cron.sh` 的硬截止 `_HARD_STOP_MIN=95`（01:35）保证**：距 01:35 不足 20 分钟不再起新一轮，每轮 timeout 也按剩余时间收窄（00:00 起的第一轮仍是完整 90m）。否则 rc=3 的重跑能跑到 01:53，而 health_check 见"主任务还在跑"会**不判定地退 0**——那一晚等于没人检查过。
@@ -78,6 +83,8 @@ SPARK_HOST=USER@HOST ./tools/deploy.sh
    systemctl is-active xvfb      # 必须输出 active
    ```
    unit 里是 `Xvfb :99 -screen 0 800x600x24 -nolisten tcp`，与 `config.json` 的 `display: ":99"` 对应；改端口要两边一起改，`run_cron.sh` 的 `SPARK_DISPLAY` 也要跟着改。
+
+   巡检的 `check_xvfb_display` 除了问 `systemctl is-active xvfb`，还会查 `/tmp/.X11-unix/X99` 这个 socket 在不在——只信 systemd 是不够的：unit 崩溃重启期间 systemd 照样报 `active`，而浏览器连上去就是一个连不上的显示。所以装完务必确认 `ls /tmp/.X11-unix/` 里有 `X99`。
 
 ## cron 行为
 
@@ -116,6 +123,6 @@ cron 每天 00:00 调用包装脚本 `run_cron.sh`：
 
 ## 开发与调试约定
 
-- **本地先跑通**：编译、`--dry-run`、单测都在本地虚拟环境里做（`python -m venv .venv && .venv/bin/pip install -r requirements.txt`），跑通后再同步到部署机。
+- **本地先跑通**：编译、`--dry-run`、单测都在本地虚拟环境里做（`python -m venv .venv && .venv/bin/pip install -r requirements-dev.txt`），跑通后再同步到部署机。
 - **版本要对齐**：本地与部署机 Python 版本可能不同，涉及版本相关行为的改动，以部署机真机复验一次为准。
 - **同步方式自选，但代码和登录态分两趟**：代码走 `git bundle` / `rsync` / `git pull` 都行；`runtime/storage.json` 单独 `scp` 并 `chmod 600`，**账本**（`state.json` / `spark.log`）留在部署机自己生成，别反向覆盖回去。脚本的可执行位要保（`rsync` 加 `-a`，或传完 `chmod +x`）。

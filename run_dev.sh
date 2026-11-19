@@ -13,7 +13,7 @@ cd "$(dirname "$0")"
 
 if [ ! -x .venv/bin/python ]; then
     echo "错误: 找不到 .venv/bin/python。先装环境:" >&2
-    echo "  python3 -m venv .venv && .venv/bin/pip install -r requirements.txt" >&2
+    echo "  python3 -m venv .venv && .venv/bin/pip install -r requirements-dev.txt" >&2
     echo "  .venv/bin/playwright install chromium" >&2
     exit 1
 fi

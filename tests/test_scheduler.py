@@ -307,6 +307,8 @@ class TestRunArgumentParsing(unittest.TestCase):
 
         cfg = {
             "send_window": {"start": "23:30", "end": "00:30"},
+            "headless": False,
+            "display": ":99",
             "accounts": [{"name": "main", "account": "a", "password": "b"}],
         }
 
@@ -343,6 +345,8 @@ class TestRunBrowserReuse(unittest.TestCase):
         self.cfg = {
             "send_window": {"start": "23:30", "end": "00:30"},
             "browser_reuse": True,
+            "headless": False,
+            "display": ":99",
             "accounts": [{"name": "main", "account": "a", "password": "b"}],
         }
         self.addCleanup(self.patcher_playwright.stop)
@@ -529,6 +533,8 @@ class TestRunVerifySend(unittest.TestCase):
         self.mock_playwright.return_value.__enter__.return_value = self.p
         self.cfg = {
             "send_window": {"start": "23:30", "end": "00:30"},
+            "headless": False,
+            "display": ":99",
             "accounts": [{"name": "main", "account": "a", "password": "b"}],
         }
         self.addCleanup(self.patcher_playwright.stop)
@@ -726,6 +732,8 @@ class TestRunDefaultBrowser(unittest.TestCase):
         self.cfg = {
             "send_window": {"start": "23:30", "end": "00:30"},
             "browser_reuse": False,
+            "headless": False,
+            "display": ":99",
             "accounts": [{"name": "main", "account": "a", "password": "b"}],
         }
         self.addCleanup(self.patcher_playwright.stop)
@@ -1141,6 +1149,8 @@ class TestLoginFailureIsolation(unittest.TestCase):
     def test_run_logged_out_account_does_not_skip_later_accounts(self):
         cfg = {
             "send_window": {"start": "23:30", "end": "00:30"},
+            "headless": False,
+            "display": ":99",
             "accounts": [
                 {"name": "first", "account": "a", "password": "b"},
                 {"name": "second", "account": "c", "password": "d"},
@@ -1195,7 +1205,11 @@ class TestEmptyPendingNightRecord(unittest.TestCase):
     """
 
     def _invoke(self, msave, mgap):
-        cfg = {"send_window": {"start": "23:30", "end": "00:30"}}
+        cfg = {
+            "send_window": {"start": "23:30", "end": "00:30"},
+            "headless": False,
+            "display": ":99",
+        }
         account = {"name": "main", "account": "a", "password": "b"}
         with (
             patch("src.scheduler.sync_playwright"),
@@ -1615,7 +1629,11 @@ class TestPidLockExemption(unittest.TestCase):
             patch.object(
                 _scheduler_mod,
                 "load_config",
-                return_value={"accounts": [{"name": "a"}]},
+                return_value={
+                    "accounts": [{"name": "a"}],
+                    "headless": False,
+                    "display": ":99",
+                },
             ),
             patch.object(_scheduler_mod, "in_window", return_value=True),
             patch.object(sys, "argv", ["spark.py", "--dry-run", "--no-jitter"]),

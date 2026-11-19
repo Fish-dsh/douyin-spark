@@ -4,17 +4,21 @@
 
 ```bash
 python3 -m venv .venv
-.venv/bin/pip install -r requirements.txt
+.venv/bin/pip install -r requirements-dev.txt   # 开发环境: 运行时 + ruff + pytest
 .venv/bin/playwright install chromium
 ```
 
-`requirements.txt` 里版本全部锁死，分两类：
+依赖分成三份，按「跑起来到底需要什么」切，不是按喜好切：
 
-- **运行时必需**：`playwright`（浏览器自动化）。
-- **可选**：`opencv-python-headless`——只有视觉兜底的 CV 粗定位层（`src/vision_cv.py`）用；没装时 `cv2` 为 `None`，该层自动放弃，主链路不受影响。
-- **开发用**：`ruff`（lint），跑 `ruff check .` 才需要。
+| 文件 | 什么时候装 | 内容 |
+| --- | --- | --- |
+| `requirements.txt` | **任何机器都要** | `playwright`（主链路唯一硬依赖） |
+| `requirements-vision.txt` | 想要 CV 粗定位那层才装 | 上面那份 + `opencv-python-headless` |
+| `requirements-dev.txt` | 开发机 / CI | 上面第一份 + `ruff` + `pytest` |
 
-所以「`pip install -r requirements.txt` 装全」= 开发环境；弱机只跑生产可以省掉 ruff 甚至 opencv。
+为什么拆：`opencv-python-headless` 解压出来比整份代码还大，而板子只有 1.5G 内存。以前它写在 `requirements.txt` 里，于是「只跑生产」的机器也被迫装一个可选库。现在不装 `requirements-vision.txt` 时 `src/vision_cv.py` 里 `cv2` 为 `None`，该层自动放弃，主链路不受影响 —— 代价只是选择器全失效时的兜底能力弱一层，而这个代价本来就不该由内存说算。
+
+生产板子上 vision 那份是装了的（`docs/operations.md` 的部署步骤用它）。
 
 ## 跑测试
 
@@ -29,7 +33,9 @@ PY=/usr/bin/python3.11 ./tools/verify.sh   # 换一个解释器交叉验证
 
 退出码分三种：`0` 全过；`1` 有检查真失败；`2` **没有失败但有步骤被跳过**（干净机器上没装 ruff 或 node / 用了 `--fast` 就属于这类）。`2` 不是绿 —— 它表示「没验证到」，别在脚本里把它当通过。
 
-第 2 步 `tools/check_js.py` 值得单独说一句：`src/` 里大量 JS 是写在 Python 三引号里的字符串，语法错只有在浏览器里 `page.evaluate` 执行时才炸，生产日志里表现为 `Page.evaluate: SyntaxError`，本地单测和 `compileall` 都看不见。这个脚本用 `ast` 把那些常量抠出来交给 `node --check`，一次扫 24 段左右。node 不是本项目的依赖（这不是 Node 项目），没装就跳过该步。
+第 2 步 `tools/check_js.py` 值得单独说一句：`src/` 里大量 JS 是写在 Python 三引号里的字符串，语法错只有在浏览器里 `page.evaluate` 执行时才炸，生产日志里表现为 `Page.evaluate: SyntaxError`，本地单测和 `compileall` 都看不见。这个脚本用 `ast` 把那些常量抠出来交给 `node --check`。
+
+它扫两类东西：`src/` 下所有 `.py` 与仓库根的几个脚本里**赋值给名字**的 JS 常量（`_JS_REDACT = """..."""` 这种），以及**直接写进调用参数**的内联脚本（`page.evaluate("""() => {...}""")`）。第二类是重点：内联脚本没有名字，靠人工盯永远会漏，而它们和常量一样只在浏览器里才会炸。当前一次扫 24 个文件、37 段 JS。node 不是本项目的依赖（这不是 Node 项目），没装就跳过该步。
 
 分开跑也行：
 

@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -131,6 +132,38 @@ class ConfigError(RuntimeError):
     """配置缺失到「跑下去也毫无意义」的程度。必须让调用方非 0 退出。"""
 
 
+# 有头模式是硬约束(AGENTS.md)。桌面临时调试要能跑 headless, 但不能靠"改配置
+# 顺手留一手"—— 所以就留这一个环境变量作唯一出口, 且它只影响本地调试,
+# 无人值守的 cron 环境里没有它, 写了 headless=true 一律拒绝启动。
+ALLOW_HEADLESS_ENV = "SPARK_ALLOW_HEADLESS"
+# X display 必须是 :N 或 :N.M 形式; 空串/绝对路径都不算。
+_DISPLAY_RE = re.compile(r"^:\d+(\.\d+)?$")
+
+
+def headless_refusal(cfg: dict) -> str:
+    """返回「为什么这份配置在无人值守下不能跑」; 可跑则返回空串。
+
+    校验两件事, 缺一不可:
+      1. headless 不能是 true —— 抖音会给 headless chromium 弹拦截页, 弱机
+         还会渲染挂死(2026-09-30 事故: 当晚全部好友 skip 漏发)。
+      2. display 必须是 :N 形式 —— 有头模式没有 X 显示就是开一个渲染不出东西
+         的浏览器; 之前只判「display 是否为真值」, 于是 ":88" 这种写错的
+         显示号也能过闸门, 而板上只有 :99 一个 Xvfb。
+    """
+    if cfg.get("headless") is not False:
+        return (
+            f"headless={cfg.get('headless')!r}; 无人值守必须 headless=false。"
+            f"桌面临时调试请显式设置 {ALLOW_HEADLESS_ENV}=1 再跑。"
+        )
+    display = cfg.get("display")
+    if not isinstance(display, str) or not _DISPLAY_RE.match(display.strip()):
+        return (
+            f'display={display!r}; 有头模式必须给一个 X display, 形如 ":99"'
+            "(板端对应 systemd 的 xvfb.service)。"
+        )
+    return ""
+
+
 def preflight(cfg: dict) -> None:
     """跑之前先确认这份配置是能真正干活的。
 
@@ -138,6 +171,10 @@ def preflight(cfg: dict) -> None:
     的桩, 空 accounts 让 run_cron.sh 以 rc=0 结束 —— 那一晚实际发送 0 个好友, 而
     health_check 判健康、告警通道同时消失, 整条链上没有任何一个环节会出声。
     缺到这个程度只能是硬失败: 抛 ConfigError, 由调用方转成退出码 5。
+
+    有头模式同理: 它以前只在 load_config 里告警一句, 然后照跑 —— 也就是说
+    「配置写错」和「跑起来」之间没有任何一处会拦。现在它和 accounts 一样是
+    启动硬门禁, 只有 SPARK_ALLOW_HEADLESS=1 时放行(桌面档调试专用)。
     """
     accounts = cfg.get("accounts") or []
     if not accounts:
@@ -150,6 +187,15 @@ def preflight(cfg: dict) -> None:
             raise ConfigError(f"accounts[{i}] 不是对象: {acc!r}")
         if not str(acc.get("name") or "").strip():
             raise ConfigError(f"accounts[{i}] 没有 name 字段")
+    if os.environ.get(ALLOW_HEADLESS_ENV) == "1":
+        log(
+            f"[preflight] {ALLOW_HEADLESS_ENV}=1, 跳过有头模式硬门禁"
+            "(只适用于桌面临时调试)"
+        )
+        return
+    reason = headless_refusal(cfg)
+    if reason:
+        raise ConfigError(f"有头模式硬门禁未通过: {reason}")
 
 
 def get_account_state_file(account: dict) -> Path:

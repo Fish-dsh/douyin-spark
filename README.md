@@ -6,7 +6,7 @@
 
 > **免责声明**：本项目为个人自动化实践，与抖音官方无关。自动化操作可能触发平台风控，请自行评估风险并遵守平台协议；由此产生的任何后果由使用者自负。
 
-`Python 3.9+` · `Playwright (Chromium)` · `MIT` · `561 单元测试`
+`Python 3.9+` · `Playwright (Chromium)` · `MIT` · `586 单元测试`
 
 ---
 
@@ -26,7 +26,7 @@ git clone https://github.com/Fish-dsh/douyin-spark.git
 cd douyin-spark
 
 python3 -m venv .venv
-.venv/bin/pip install -r requirements.txt
+.venv/bin/pip install -r requirements.txt      # 只跑主链路; 想要视觉兜底的 CV 层装 requirements-vision.txt
 .venv/bin/playwright install chromium          # 首次需要下载浏览器
 # 若报缺系统库: sudo .venv/bin/playwright install-deps chromium
 
@@ -43,7 +43,7 @@ cp .env.example .env && chmod 600 .env         # 只有用密码登录才需要�
 
 几句必须知道的话：
 
-- **浏览器必须是"有头"模式**（`headless: false` + Xvfb `:99`），否则抖音会拦、弱机还会渲染挂死。这条是硬约束，部署前先看 [部署文档](docs/deployment.md)。
+- **浏览器必须是"有头"模式**（`headless: false` + Xvfb `:99`），否则抖音会拦、弱机还会渲染挂死。这条不是文档里的建议，而是**启动硬门禁**：`config.json` 里缺 `headless`、写成 `true`、或者 `display` 不是 `:N` 形式，`spark.py` 一律以退出码 5 拒绝启动（桌面临时调试要跑 headless 时设 `SPARK_ALLOW_HEADLESS=1`）。部署前先看 [部署文档](docs/deployment.md)。
 - **`.env` 不是必需的**：只有走 `login.py --password`（密码登录）才要往里填账号密码。用 `--manual` 扫码登录的话，`.env` 留空就行。**`.env` / `config.json` / `runtime/` 都不要提交**，已经在 `.gitignore` 里。
 - **登录态在 `runtime/storage.json`**。它单独传、别进仓库 —— 把它跟代码一起同步过去这件事做漏了，部署机会去扫码登录而无人值守下没人做，当晚就是静默零发送。细节见部署文档「三类东西分开走」。
 - **没有屏幕的 VPS 上 `--manual` 起不来**（没地方弹浏览器），要么本机登好再传 `storage.json`，要么临时装 Xvfb 用 `ssh -X` 转发窗口。
@@ -79,7 +79,7 @@ cp .env.example .env && chmod 600 .env         # 只有用密码登录才需要�
 
 ```bash
 sudo rsync -a --exclude runtime --exclude .venv ./ /opt/douyin-spark/   # 1. 放代码（路径可在 run_cron.sh 改）
-cd /opt/douyin-spark && python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
+cd /opt/douyin-spark && python3 -m venv .venv && .venv/bin/pip install -r requirements-vision.txt
 sudo .venv/bin/playwright install-deps chromium                          # 2. 系统库（要 root）
 .venv/bin/playwright install chromium                                    #    浏览器本体（当前用户，别用 sudo）
 sudo apt install -y xvfb                                                 # 3. Xvfb 常驻 :99

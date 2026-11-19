@@ -1,0 +1,9 @@
+# 视觉兜底定位层(src/vision_cv.py)的可选依赖。
+#
+# 装了才有 CV 粗定位那一路(截图后本地找火花图标行, 再交给模型指认)。
+# 未装时 src/vision_cv.py 里 cv2=None, 该层自动放弃, 主链路不受影响 ——
+# 代价是选择器全失效时的兜底能力弱一层。
+#
+# 板子(1.5G 内存)装了; 内存更紧的机器可以不装。
+-r requirements.txt
+opencv-python-headless==5.0.0.93

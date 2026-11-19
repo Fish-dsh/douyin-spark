@@ -1,0 +1,6 @@
+# 开发/CI 依赖。跑 lint(tools/verify.sh)与单测(pytest tests)才需要。
+#
+# 生产机器不需要这些: 装了只是多占磁盘, 不影响运行。
+-r requirements.txt
+ruff==0.16.8
+pytest==8.4.2

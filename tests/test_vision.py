@@ -116,6 +116,93 @@ class TestRedactionScript(unittest.TestCase):
         self.assertIn("flame", _JS_REDACT)
         self.assertIn("if (flame.test(s)) continue;", _JS_REDACT)
 
+    def test_walks_open_shadow_roots(self):
+        """shadow DOM 里的文本 createTreeWalker(document.body) 走不进去。
+
+        抖音的会话项里就有 shadow host —— 只从 body 起遍历, 那部分文本一个遮罩
+        都不会生成, 而脚本返回的计数照样漂亮, 反而是种掩护。
+        """
+        from src.vision import _JS_REDACT
+
+        self.assertIn("shadowRoot", _JS_REDACT)
+
+    def test_covers_iframe(self):
+        """跨源 iframe 的 DOM 读不到, 只能整块盖 —— 读不到就别猜它是空的。"""
+        from src.vision import _JS_REDACT
+
+        self.assertIn("iframe", _JS_REDACT)
+
+    def test_covers_pseudo_element_content(self):
+        """::before / ::after 的 content 是可见文字, 但不在文本节点里。"""
+        from src.vision import _JS_REDACT
+
+        self.assertIn("::before", _JS_REDACT)
+        self.assertIn("::after", _JS_REDACT)
+
+
+class TestRedactionGate(unittest.TestCase):
+    """覆盖率闸门: "脚本没抛异常" 不等于 "遮住了东西"。
+
+    这是脱敏链上最凶的一种失败 —— 页面还在骨架屏, 或者选择器改版后一个节点都
+    没匹配上, 脚本老老实实返回 0, 旧代码照样 return True, 于是拍下一张完全没
+    打码的整屏发给外部模型。没人会为此报错, 因为整条链看起来是成功的。
+    """
+
+    def _page(self, ret):
+        page = MagicMock()
+        page.evaluate.return_value = ret
+        return page
+
+    def test_zero_hits_is_failure(self):
+        from src import vision
+
+        page = self._page(0)
+        self.assertFalse(vision._inject_redaction(page))
+
+    def test_negative_hits_is_failure(self):
+        from src import vision
+
+        self.assertFalse(vision._inject_redaction(self._page(-1)))
+
+    def test_non_numeric_result_is_failure(self):
+        from src import vision
+
+        self.assertFalse(vision._inject_redaction(self._page(None)))
+        self.assertFalse(vision._inject_redaction(self._page("很多")))
+
+    def test_positive_hits_pass(self):
+        from src import vision
+
+        self.assertTrue(vision._inject_redaction(self._page(7)))
+
+    def test_numeric_string_passes(self):
+        """JS 侧偶尔会把数字带成字符串回来, 这不是失败, 别误杀。"""
+        from src import vision
+
+        self.assertTrue(vision._inject_redaction(self._page("12")))
+
+    def test_evaluate_exception_is_failure(self):
+        from src import vision
+
+        page = MagicMock()
+        page.evaluate.side_effect = RuntimeError("page closed")
+        self.assertFalse(vision._inject_redaction(page))
+
+    def test_zero_hits_aborts_screenshot(self):
+        """闸门要真的挡住截图: 命中 0 时不许留下任何 png。"""
+        from src import vision
+
+        page = MagicMock()
+        page.evaluate.return_value = 0
+        with (
+            tempfile.TemporaryDirectory() as td,
+            patch("src.vision._SHOT_DIR", Path(td)),
+        ):
+            out = vision._redacted_screenshot(page)
+            self.assertEqual(out, "")
+            self.assertEqual(list(Path(td).glob("*.png")), [])
+        page.screenshot.assert_not_called()
+
 
 class TestLocateRows(unittest.TestCase):
     def test_happy_path(self):

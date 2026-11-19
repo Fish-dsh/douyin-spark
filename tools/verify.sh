@@ -12,6 +12,7 @@
 #
 # 退出码: 0 全过 / 1 有检查失败 / 2 没失败但有步骤因缺工具被跳过
 #         (2 表示"没验证到", 不是"验证过了", 别把它当绿)。
+#         --fast 主动跳过单测不计入 2 —— 那是使用者按需裁剪, 不是缺工具。
 #
 # 注意: 本地通过 != 远端 CI 通过。这里只有一台机器、一个 Python 版本、
 # 一个非干净环境 —— 它证明的是"在我这台机器上过了", 不是"在别人机器上会过"。
@@ -29,7 +30,7 @@ elif command -v python3 >/dev/null 2>&1; then
   PY=python3
 else
   echo "找不到 python3, 也没有 .venv/bin/python" >&2
-  echo "先建环境: python3 -m venv .venv && .venv/bin/pip install -r requirements.txt" >&2
+  echo "先建环境: python3 -m venv .venv && .venv/bin/pip install -r requirements-dev.txt" >&2
   exit 1
 fi
 
@@ -76,7 +77,10 @@ fi
 
 if [ "${1:-}" = "--fast" ]; then
   step "4/4 单测"
-  skip "--fast 只做语法、JS 语法和 lint"
+  # 这里刻意**不**走 skip(): --fast 是使用者主动选择的"这次不跑单测",
+  # 属于按需裁剪, 不属于"缺工具没验证到"。算进 SKIPPED 会让退出码恒为 2,
+  # 而 .githooks/pre-push 就是拿 --fast 跑的 —— 结果每次推送都被自己的闸门拦下。
+  echo "按 --fast 要求跳过(不是缺检, 不计入退出码)"
 else
   step "4/4 单测"
   # 优先 pytest, 没装就退回 unittest discover(标准库, 一定在)。

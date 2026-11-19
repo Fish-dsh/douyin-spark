@@ -57,6 +57,11 @@ PID_FILE = BASE_DIR / "runtime" / ".spark.pid"
 HEARTBEAT_FILE = BASE_DIR / "runtime" / "heartbeat.json"
 # 抽成模块常量仅为可测: 单测把根目录指到临时区即可验证"活锁/陈旧锁"判定
 _PROC_ROOT = Path("/proc")
+# Xvfb 起来没起来, systemd 说 active 只是第一层证据; 真正能证明「这个显示号可以连」
+# 的是 X server 在 socket 目录里留下的那条 socket。以前只查 systemctl, 于是
+# 「unit 处于 active 但 Xvfb 正在崩溃重启」这类状态会被判健康 —— 而有头浏览器
+# 连不上 X 就是整晚渲染不出来。单测把这里指到临时目录即可覆盖。
+_X11_SOCKET_DIR = Path("/tmp/.X11-unix")
 
 # spark.py 正常收尾的两类日志标记(均带 [YYYY-MM-DD 前缀)
 # 注意: 无待续好友的真实日志是「今日(2026-08-15)没有需要续火花的好友, 程序结束」,
@@ -421,22 +426,62 @@ def check_headed_config() -> tuple[bool, str]:
         return False, f"config.json 顶层不是对象({type(cfg).__name__}), 无法确认有头模式配置"
     headless = cfg.get("headless")
     display = cfg.get("display")
-    if headless is False and display:
+    # display 必须真的是一个显示号。以前这里只判「是否为真值」, 于是 ":88"
+    # 这种板上根本不存在的显示号也能通过 —— 配置写错和跑起来之间又缺了一道闸。
+    if (
+        headless is False
+        and isinstance(display, str)
+        and re.match(r"^:\d+(\.\d+)?$", display.strip())
+    ):
         return True, f"有头模式配置正常 (display={display})"
     return (
         False,
         (
             f"config.json 有头模式配置缺失/错误: headless={headless!r}, display={display!r}; "
-            '应为 headless=false 且 display=":99" (headless 会被抖音拦截并渲染挂死)'
+            '应为 headless=false 且 display=":99" '
+            "(headless 会被抖音拦截并渲染挂死; display 必须是 :N 形式)"
         ),
     )
 
 
+def _configured_display() -> str:
+    """从 config.json 读出配置的 display; 读不出来返回空串。"""
+    try:
+        cfg = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        return ""
+    if not isinstance(cfg, dict):
+        return ""
+    display = cfg.get("display")
+    return display.strip() if isinstance(display, str) else ""
+
+
 def check_xvfb_display() -> tuple[bool, str]:
-    """Xvfb 常驻服务检查; 有 config.json(板子语境)才检查, 无 systemd 环境跳过。"""
+    """Xvfb 常驻服务检查。
+
+    判据分两层, 都要过:
+      1. systemd 说 xvfb.service 是 active —— 这是服务管理面的证据;
+      2. 配置的那个显示号在 /tmp/.X11-unix 里真有 socket —— 这才是「有头浏览器
+         连得上」的证据。
+
+    只查第 1 层是不够的: unit 处于 active 而 Xvfb 正在崩溃重启时, systemd 依旧
+    报 active, 而浏览器连上去就是一个连不上的显示。反过来, 板上把 display 配成
+    ":88" 也照样能过旧检查 —— 那台机器上根本没有 :88。
+
+    无 systemctl 的环境(开发机/CI)按老规矩跳过服务层, 但仍会核 socket 是否
+    存在: 有就说明显示真的在, 没有则这一项无从确认, 仍报跳过。
+    """
     if not CONFIG_FILE.is_file():
         return True, "config.json 不存在, 跳过 Xvfb 检查"
+    display = _configured_display()
+    socket_ok = False
+    socket_name = ""
+    if display:
+        socket_name = "X" + display.lstrip(":").split(".")[0]
+        socket_ok = (_X11_SOCKET_DIR / socket_name).exists()
     if shutil.which("systemctl") is None:
+        if socket_ok:
+            return True, f"无 systemctl, 但 {_X11_SOCKET_DIR}/{socket_name} 存在"
         return True, "无 systemctl, 跳过 Xvfb 检查"
     try:
         proc = subprocess.run(
@@ -449,15 +494,24 @@ def check_xvfb_display() -> tuple[bool, str]:
     except Exception as exc:
         return True, f"systemctl 检查失败({exc}), 跳过 Xvfb 检查"
     state = (proc.stdout or proc.stderr or "").strip()
-    if proc.returncode == 0 and state == "active":
-        return True, "xvfb.service active"
-    return (
-        False,
-        (
-            f"xvfb.service 状态={state or 'unknown'}, 有头模式将无虚拟显示可用 "
-            "(启动: systemctl start xvfb)"
-        ),
-    )
+    if proc.returncode != 0 or state != "active":
+        return (
+            False,
+            (
+                f"xvfb.service 状态={state or 'unknown'}, 有头模式将无虚拟显示可用 "
+                "(启动: systemctl start xvfb)"
+            ),
+        )
+    if display and not socket_ok:
+        return (
+            False,
+            (
+                f"xvfb.service 报 active, 但配置的 display={display} 没有对应 socket "
+                f"({_X11_SOCKET_DIR}/{socket_name} 不存在); "
+                "多半是 unit 在崩溃重启, 或者 display 配错了显示号"
+            ),
+        )
+    return True, f"xvfb.service active (display={display or '未配置'}, socket={'有' if socket_ok else '未核验'})"
 
 
 # 注: 早期还有一个「记档对账」检查项, 依赖维护者的私有工作日志工具, 与本项目运行无关,

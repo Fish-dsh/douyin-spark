@@ -15,11 +15,22 @@
 
 **脱敏**(用户要求「裁剪+打码后发」): 外发前用 DOM 注入黑色遮罩盖住**整个视口**的
 全部文本(昵称/消息预览/时间/右侧已打开的会话记录)、**头像 img**(人脸), 以及不进
-文本节点的四类像素: `input`/`textarea`/`select` 的值、`canvas`、`video`、带
-`background-image` 的元素。只保留火花图标与火花底图(判定需要, 按 src 关键词保留,
-与类名无关)。两处修正都在 2026-11-19: 最初只盖左栏 45%(右侧会话明文外发), 之后
-发现漏了输入框/canvas/video/背景图。昵称不来自模型 —— 它由本地 DOM 回填, 故打码
-不影响功能。以后新增任何可视元素, 都该按「会不会把用户内容画进截图」重新过一遍。
+文本节点的像素: `input`/`textarea`/`select` 的值、`canvas`、`video`、`iframe`、
+带 `background-image` 的元素、以及 `::before`/`::after` 有可见 `content` 的元素。
+只保留火花图标与火花底图(判定需要, 按 src 关键词保留, 与类名无关)。
+
+文本遍历会进 **open shadow root**(会话项里有 shadow host, 只从 `document.body` 起
+`createTreeWalker` 走不进去, 那部分文本一个遮罩都生成不出来); 闭包 shadow root
+拿不到, 属于已知残留风险。跨源 `iframe` 同理读不到 DOM, 按"读不到就整块盖"处理。
+
+**覆盖闸门**: 注入后必须真的命中 ≥1 处才算成功。命中 0 意味着脚本什么都没遮住
+(骨架屏 / 选择器改版 / 空白页), 此时放弃这次截图并退回 DOM 取证 —— 脱敏链上
+"看着成功其实什么都没做"是最坏的一种失败, 它不报错。
+
+历次修正都发生在 2026-11-19: 最初只盖左栏 45%(右侧会话明文外发) → 补输入框/
+canvas/video/背景图 → 补 shadow DOM / iframe / 伪元素 / 覆盖闸门。昵称不来自模型,
+它由本地 DOM 回填, 故打码不影响功能。以后新增任何可视元素, 都该按「会不会把用户
+内容画进截图」重新过一遍。
 
 **可用性**: 主用 AGNES(`agnes-2.5-flash`, 实测不限流、约 1.5s, 但坐标偏一行);
 备用 GLM(`glm-4.6v-flash`, 坐标准但免费档常限流)。都失败/未配置 → 返回空表,
@@ -110,18 +121,27 @@ _JS_REDACT = """
   // (行定位必需)。行定位只看左栏版式, 多打码不影响候选点质量。
   const limitX = vw;
   const boxes = [];
-  const walker = document.createTreeWalker(
-    document.body, NodeFilter.SHOW_TEXT, null
-  );
-  let node;
-  while ((node = walker.nextNode())) {
-    if (!(node.textContent || '').trim()) continue;
-    const p = node.parentElement;
-    if (!p) continue;
-    const r = p.getBoundingClientRect();
-    if (r.width < 1 || r.height < 1) continue;
-    if (r.left > limitX || r.bottom < 0 || r.top > vh) continue;
-    boxes.push([r.left, r.top, r.width, r.height]);
+  // 遍历入口: 除了 document.body, 还要进 open shadow root —— 抖音的会话项里确实
+  // 有 shadow host, createTreeWalker(document.body) 走不进去, 于是那部分文本
+  // 一个遮罩都不会生成(而脚本本身返回的计数还算漂亮, 掩盖了这个漏)。
+  const roots = [document.body];
+  for (let i = 0; i < roots.length; i++) {
+    for (const el of roots[i].querySelectorAll('*')) {
+      if (el.shadowRoot) roots.push(el.shadowRoot);   // 闭包 shadow 拿不到, 尽力
+    }
+  }
+  for (const root of roots) {
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, null);
+    let node;
+    while ((node = walker.nextNode())) {
+      if (!(node.textContent || '').trim()) continue;
+      const p = node.parentElement || node.parentNode;
+      if (!p || !p.getBoundingClientRect) continue;
+      const r = p.getBoundingClientRect();
+      if (r.width < 1 || r.height < 1) continue;
+      if (r.left > limitX || r.bottom < 0 || r.top > vh) continue;
+      boxes.push([r.left, r.top, r.width, r.height]);
+    }
   }
   const flame = /(flame|fire|streak|spark)/i;
   const push = (el) => {
@@ -141,10 +161,12 @@ _JS_REDACT = """
   //   CSS background-image 承载的头像/表情/贴纸在 SPA 里很常见。
   // 一律盖住; 只对 background-image 放行 URL 命中火花关键词的(与 img 同一判据)。
   for (const el of document.querySelectorAll(
-    'input, textarea, select, canvas, video'
+    'input, textarea, select, canvas, video, iframe'
   )) {
     push(el);
   }
+  // iframe 也在上面那行: 跨源 iframe 里的 DOM 我们读不到(浏览器不允许), 那就
+  // 整块盖住 —— 读不到内容时「盖住」比「猜它是空的」安全。
   for (const el of document.querySelectorAll('*')) {
     if (el.closest('#__spark_redact__')) continue;
     let bg = '';
@@ -153,8 +175,22 @@ _JS_REDACT = """
     } catch (e) {
       bg = '';
     }
-    if (!bg || bg === 'none' || bg.indexOf('url(') < 0) continue;  // 跳过纯渐变
-    if (flame.test(bg)) continue;                                  // 火花底图保留
+    // ::before / ::after 的 content 也是可见文字, 但它在伪元素里, 文本节点遍历
+    // 拿不到, 只能按宿主元素整块盖。
+    let pseudo = '';
+    try {
+      const b = getComputedStyle(el, '::before').content || '';
+      const a = getComputedStyle(el, '::after').content || '';
+      pseudo = b + a;
+    } catch (e) {
+      pseudo = '';
+    }
+    const hasPseudo =
+      pseudo && pseudo !== 'none' && pseudo !== 'normal' &&
+      pseudo.replace(/["']/g, '').trim().length > 0;
+    const hasBg = bg && bg !== 'none' && bg.indexOf('url(') >= 0;
+    if (!hasBg && !hasPseudo) continue;
+    if (hasBg && !hasPseudo && flame.test(bg)) continue;  // 火花底图保留
     push(el);
   }
   const wrap = document.createElement('div');
@@ -294,13 +330,30 @@ def _provider_chain() -> list[str]:
 
 
 def _inject_redaction(page) -> bool:
+    """注入脱敏遮罩; 只返回 True 的条件是**真的遮到了东西**。
+
+    "脚本没抛异常" 不等于"遮住了": 页面还在骨架屏、选择器改版、或者落在一个
+    空白页上时, 遍历找不到任何文本节点和头像, 返回 0 —— 以前这里照样 return
+    True, 于是 /_redacted_screenshot 拍下一张**完全没打码**的整屏, 直接发给外部
+    模型。脱敏链路上"看着成功其实什么都没做"是最坏的一种失败: 它静默。
+
+    所以 0 必须当失败处理: 放弃这次截图, 让调用方退回 DOM 取证。
+    """
     try:
         n = page.evaluate(_JS_REDACT)
-        log(f"[vision] 已注入脱敏遮罩 {n} 处(文本+头像, 保留火花图标)")
-        return True
     except Exception as exc:
         log(f"[vision] 注入脱敏遮罩失败: {exc}")
         return False
+    try:
+        count = int(n)
+    except (TypeError, ValueError):
+        log(f"[vision] 脱敏脚本返回非数字 {n!r}, 无法确认覆盖, 放弃本次截图")
+        return False
+    if count <= 0:
+        log("[vision] 脱敏遮罩命中 0 处, 无法确认覆盖, 放弃本次截图")
+        return False
+    log(f"[vision] 已注入脱敏遮罩 {count} 处(文本+头像, 保留火花图标)")
+    return True
 
 
 def _remove_redaction(page) -> None:

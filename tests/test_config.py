@@ -400,8 +400,76 @@ class TestPreflight(unittest.TestCase):
         with self.assertRaises(ConfigError):
             preflight({"accounts": [{"name": "   "}]})
 
+    # 有头模式是硬门禁: accounts 齐了还不够, headless/display 写错同样拒绝启动。
+    # 下面这组用例把「配置写错」和「跑起来」之间那道以前的空缺钉住。
     def test_good_config_passes(self):
-        preflight({"accounts": [{"name": "main"}, {"name": "ACCOUNT_B"}]})
+        preflight(
+            {
+                "accounts": [{"name": "main"}, {"name": "ACCOUNT_B"}],
+                "headless": False,
+                "display": ":99",
+            }
+        )
+
+    def test_headless_true_raises(self):
+        with self.assertRaises(ConfigError) as cm:
+            preflight(
+                {"accounts": [{"name": "main"}], "headless": True, "display": ":99"}
+            )
+        self.assertIn("headless", str(cm.exception))
+
+    def test_missing_headless_raises(self):
+        """没写 headless 不能当"默认有头"放行 —— 那正是 2026-09-30 事故的形态。"""
+        with self.assertRaises(ConfigError) as cm:
+            preflight({"accounts": [{"name": "main"}], "display": ":99"})
+        self.assertIn("headless", str(cm.exception))
+
+    def test_missing_display_raises(self):
+        with self.assertRaises(ConfigError) as cm:
+            preflight({"accounts": [{"name": "main"}], "headless": False})
+        self.assertIn("display", str(cm.exception))
+
+    def test_bad_display_raises(self):
+        """display 必须是 :N 形式, 写成路径或裸数字都不行。
+
+        这里只管**格式**: "是否存在那个显示" 是运行时的事(check_xvfb_display 查
+        /tmp/.X11-unix 里的 socket), 配置层不该去猜机器上开了哪些显示号。
+        """
+        # 注意 "  " 会先 strip 成空串再判, 而 ":99 " 是允许的(前后空白无意义),
+        # 所以这两个都不该出现在 bad 里 —— 前者是真错, 后者是真对。
+        for bad in (":abc", "99", "/tmp/.X11-unix/X99", "", "  "):
+            with self.subTest(display=bad):
+                with self.assertRaises(ConfigError) as cm:
+                    preflight(
+                        {"accounts": [{"name": "main"}], "headless": False, "display": bad}
+                    )
+                self.assertIn("display", str(cm.exception))
+
+    def test_display_with_screen_suffix_passes(self):
+        preflight(
+            {"accounts": [{"name": "main"}], "headless": False, "display": ":99.0"}
+        )
+
+    def test_headless_allowed_by_env_escape_hatch(self):
+        """桌面档调试的唯一出口: SPARK_ALLOW_HEADLESS=1 时放行 headless。"""
+        from unittest.mock import patch
+
+        from src import config
+
+        with patch.dict("os.environ", {config.ALLOW_HEADLESS_ENV: "1"}):
+            preflight({"accounts": [{"name": "main"}], "headless": True})
+
+    def test_env_escape_hatch_still_requires_accounts(self):
+        """逃生口只放开有头门禁, accounts 为空仍然硬失败。"""
+        from unittest.mock import patch
+
+        from src import config
+
+        with (
+            patch.dict("os.environ", {config.ALLOW_HEADLESS_ENV: "1"}),
+            self.assertRaises(ConfigError),
+        ):
+            preflight({"accounts": [], "headless": True})
 
 
 class TestEnvPath(unittest.TestCase):

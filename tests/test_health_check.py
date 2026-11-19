@@ -534,24 +534,67 @@ class TestHeadedConfigCheck(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn("顶层不是对象", msg)
 
+    def test_bad_display_format_fails(self):
+        """display 不是 :N 就失败。
+
+        旧判据只问 display 是不是真值, 于是 ":88" 一样通过 —— 而板上根本没有
+        :88 这个显示, 浏览器连上去必然失败。有头模式的配置断言不该只判"写了没写"。
+        """
+        # 只判格式: ":88" 是合法格式, 它在板上不存在这件事由 check_xvfb_display
+        # 查 /tmp/.X11-unix 里的 socket 兜住, 不该在这里判。
+        for bad in (":abc", "99", "/tmp/.X11-unix/X99", ""):
+            with self.subTest(display=bad):
+                ok, msg = self._cfg({"headless": False, "display": bad})
+                self.assertFalse(ok)
+                self.assertIn("display", msg)
+
+    def test_display_with_screen_suffix_ok(self):
+        ok, _ = self._cfg({"headless": False, "display": ":99.0"})
+        self.assertTrue(ok)
+
 
 class TestXvfbCheck(unittest.TestCase):
     """Xvfb 常驻服务检查。
 
     必须自带 config.json: check_xvfb_display 无配置时直接跳过, 否则在开发机上
-    (无 config.json)三个用例全走跳过分支, 断言 active/inactive 根本测不到。"""
+    (无 config.json)三个用例全走跳过分支, 断言 active/inactive 根本测不到。
+
+    socket 目录同样要打到临时目录: 判据的第二层是 /tmp/.X11-unix 里有没有 X99,
+    而开发机上有没有取决于自己开没开 X —— 直接读真实目录, 这些用例在别人机器上
+    就会随机红。"""
 
     def setUp(self):
         self.tmpdir = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmpdir.name)
+        self.sockets = self.root / "X11-unix"
+        self.sockets.mkdir()
         self.old_config = health_check.CONFIG_FILE
-        health_check.CONFIG_FILE = Path(self.tmpdir.name) / "config.json"
-        health_check.CONFIG_FILE.write_text(
-            json.dumps({"headless": False, "display": ":99"}), encoding="utf-8"
-        )
+        self.old_sockets = health_check._X11_SOCKET_DIR
+        health_check.CONFIG_FILE = self.root / "config.json"
+        health_check._X11_SOCKET_DIR = self.sockets
+        self._write_config(":99")
 
     def tearDown(self):
         health_check.CONFIG_FILE = self.old_config
+        health_check._X11_SOCKET_DIR = self.old_sockets
         self.tmpdir.cleanup()
+
+    def _write_config(self, display):
+        health_check.CONFIG_FILE.write_text(
+            json.dumps({"headless": False, "display": display}), encoding="utf-8"
+        )
+
+    def _run(self, active=True):
+        code = 0 if active else 3
+        state = "active" if active else "inactive"
+        with (
+            patch("src.health_check.shutil.which", return_value="/usr/bin/systemctl"),
+            patch(
+                "src.health_check.subprocess.run",
+                return_value=MagicMock(returncode=code, stdout=state + "\n", stderr=""),
+            ),
+        ):
+            return health_check.check_xvfb_display()
 
     def test_skips_without_systemctl(self):
         with patch("src.health_check.shutil.which", return_value=None):
@@ -559,26 +602,37 @@ class TestXvfbCheck(unittest.TestCase):
         self.assertTrue(ok)
         self.assertIn("跳过", msg)
 
-    def test_active_ok(self):
-        with (
-            patch("src.health_check.shutil.which", return_value="/usr/bin/systemctl"),
-            patch(
-                "src.health_check.subprocess.run",
-                return_value=MagicMock(returncode=0, stdout="active\n", stderr=""),
-            ),
-        ):
-            ok, _ = health_check.check_xvfb_display()
+    def test_active_with_socket_ok(self):
+        (self.sockets / "X99").write_text("", encoding="utf-8")
+        ok, msg = self._run()
+        self.assertTrue(ok)
+        self.assertIn("socket", msg)
+
+    def test_active_without_socket_fails(self):
+        """unit 说 active 但显示号没有 socket —— 那是崩溃重启中的 Xvfb, 不是能用的显示。"""
+        ok, msg = self._run()
+        self.assertFalse(ok)
+        self.assertIn("socket", msg)
+        self.assertIn(":99", msg)
+
+    def test_wrong_display_number_fails(self):
+        """config 里写 :88, 而机器上只有 X99 —— 配置写错必须被抓住。"""
+        self._write_config(":88")
+        (self.sockets / "X99").write_text("", encoding="utf-8")
+        ok, msg = self._run()
+        self.assertFalse(ok)
+        self.assertIn(":88", msg)
+
+    def test_display_with_screen_suffix_uses_x11_socket(self):
+        """:99.0 是合法的 X 显示写法, socket 名仍是 X99。"""
+        self._write_config(":99.0")
+        (self.sockets / "X99").write_text("", encoding="utf-8")
+        ok, _ = self._run()
         self.assertTrue(ok)
 
     def test_inactive_fails(self):
-        with (
-            patch("src.health_check.shutil.which", return_value="/usr/bin/systemctl"),
-            patch(
-                "src.health_check.subprocess.run",
-                return_value=MagicMock(returncode=3, stdout="inactive\n", stderr=""),
-            ),
-        ):
-            ok, msg = health_check.check_xvfb_display()
+        (self.sockets / "X99").write_text("", encoding="utf-8")
+        ok, msg = self._run(active=False)
         self.assertFalse(ok)
         self.assertIn("xvfb", msg)
 

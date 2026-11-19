@@ -5,11 +5,17 @@
 # config.json 桩一起打了进去, 覆盖掉部署机上真正的配置。当晚 accounts 为空,
 # 跑了 0 个好友却返回 rc=0, 巡检判健康, 告警通道也没配 —— 静默断火一整晚。
 #
-# 三条硬规矩:
-#   1. 永远不传 config.json / runtime/ / .venv / .git —— 配置与登录态各机独立。
-#      代码走这个脚本; 登录态(runtime/storage.json)另外单独传, 见 docs/deployment.md
-#   2. 传完必须校验目标机 accounts 非空(走 src/config.py::preflight), 失败就回滚
-#   3. 传完跑一次 import 冒烟, 失败也回滚
+# 四条硬规矩:
+#   1. 永远不传 config.json / .env / runtime/ / .venv / .git —— 配置、口令与
+#      登录态各机独立。tar 不读 .gitignore, 排除项只能一条条写在这里。
+#      打包完还会再验一遍压缩包内容, 混进敏感文件就直接停手(见 assert_clean)。
+#   2. 远端每一步都在 `bash -s` + `set -euo pipefail` 里跑 —— 不许用 `;` 把命令链
+#      断开, 否则 tar 失败也会被后面 chown 的成功掩盖, 一路 rc=0 静默上线半套代码。
+#   3. 传完必须校验目标机 accounts 非空(走 src/config.py::preflight), 失败就回滚
+#   4. 传完跑一次 import 冒烟, 失败也回滚
+#
+# 回滚不是万能的: 它能把被覆盖的文件还原成上一版、并把本次新增的文件删掉,
+# 但删掉的文件和运行时副作用(已重启的服务、已发出去的消息)它管不了。
 #
 # 用法:
 #   SPARK_HOST=user@host ./tools/deploy.sh
@@ -25,6 +31,8 @@ LOCAL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 STAMP="$(date +%Y%m%d-%H%M%S)"
 NEW_TGZ="/tmp/spark-deploy-$STAMP.tgz"
 PREV_TGZ="/tmp/spark-prev-$STAMP.tgz"
+PREV_LIST="/tmp/spark-prev-$STAMP.list"
+NEW_LIST="/tmp/spark-new-$STAMP.list"
 CONF_BAK="/tmp/spark-config-$STAMP.json"
 SMOKE="$(mktemp)"
 trap 'rm -f "$SMOKE" "$NEW_TGZ"' EXIT
@@ -43,21 +51,64 @@ print('import ok')
 PY
 
 cd "$LOCAL_DIR"
-echo "[deploy] 打包 (排除配置、登录态与虚拟环境)"
+echo "[deploy] 打包 (排除口令、配置、登录态与虚拟环境)"
 tar --exclude=.venv --exclude=runtime --exclude=__pycache__ --exclude=.git \
     --exclude=runtime-dev --exclude='*.log' --exclude=config.json \
+    --exclude=.env --exclude='.env.local' --exclude=storage.json \
+    --exclude='*.tgz' --exclude=.pytest_cache --exclude=.ruff_cache \
     -czf "$NEW_TGZ" .
 
+# 排除项写错一个字母就是把口令送上网, 所以不靠人眼复核, 直接问压缩包自己。
+assert_clean() {
+    local bad
+    # .env.example / .env.sample / .env.template 是给人看模板, 必须上传;
+    # 除此之外的 .env 与 .env.* 都可能带着真口令。
+    bad="$(tar -tzf "$1" \
+        | grep -Ei '(^|/)(\.env|storage\.json|state\.json|auth\.json|id_rsa)$|\.env\.[a-z]+$' \
+        | grep -Eiv '\.env\.(example|sample|template)$' || true)"
+    if [ -n "$bad" ]; then
+        echo "[deploy][ERROR] 压缩包里混进了不该上传的文件, 已中止:" >&2
+        echo "$bad" | sed 's/^/    /' >&2
+        exit 1
+    fi
+}
+assert_clean "$NEW_TGZ"
+
 echo "[deploy] 备份远端当前代码与配置"
-ssh "$HOST" "cd $REMOTE_DIR && tar --exclude=.venv --exclude=runtime \
-    --exclude=__pycache__ --exclude=.git --exclude=config.json \
-    -czf $PREV_TGZ . && cp -a config.json $CONF_BAK && echo backed-up"
+ssh "$HOST" "REMOTE_DIR='$REMOTE_DIR' PREV_TGZ='$PREV_TGZ' PREV_LIST='$PREV_LIST' \
+    CONF_BAK='$CONF_BAK' bash -s" <<'SH'
+set -euo pipefail
+cd "$REMOTE_DIR"
+tar --exclude=.venv --exclude=runtime --exclude=__pycache__ --exclude=.git \
+    --exclude=config.json -czf "$PREV_TGZ" .
+cp -a config.json "$CONF_BAK"
+tar -tzf "$PREV_TGZ" | sort >"$PREV_LIST"
+echo backed-up
+SH
 
 rollback() {
     echo "[deploy][ERROR] 校验失败, 回滚代码与配置" >&2
-    ssh "$HOST" "cd $REMOTE_DIR && tar -xzf $PREV_TGZ && cp -a $CONF_BAK config.json \
-        && chown -R $REMOTE_USER:$REMOTE_USER . && echo rolled-back" \
-        || echo "[deploy][ERROR] 回滚本身也失败了, 需要人工介入" >&2
+    ssh "$HOST" "REMOTE_DIR='$REMOTE_DIR' REMOTE_USER='$REMOTE_USER' \
+        PREV_TGZ='$PREV_TGZ' PREV_LIST='$PREV_LIST' NEW_LIST='$NEW_LIST' \
+        CONF_BAK='$CONF_BAK' bash -s" <<'SH' || echo "[deploy][ERROR] 回滚本身也失败了, 需要人工介入" >&2
+set -euo pipefail
+cd "$REMOTE_DIR"
+tar -xzf "$PREV_TGZ"
+cp -a "$CONF_BAK" config.json
+# 上一版没有、这一版新增的文件不会被 tar 覆盖还原, 得显式删掉,
+# 否则回滚完的工作区是「旧代码 + 残留新文件」的混合体。
+if [ -f "$NEW_LIST" ] && [ -f "$PREV_LIST" ]; then
+    comm -13 "$PREV_LIST" "$NEW_LIST" | while IFS= read -r f; do
+        case "$f" in
+            ''|'.'|'./') continue ;;
+            *..*) continue ;;
+        esac
+        rm -rf -- "${f#./}" 2>/dev/null || true
+    done
+fi
+chown -R "$REMOTE_USER:$REMOTE_USER" . || true
+echo rolled-back
+SH
     exit 1
 }
 
@@ -67,11 +118,26 @@ scp -q "$NEW_TGZ" "$HOST:$NEW_TGZ"
 # 0777, 于是 src/ tests/ 下每个 .py 都变成可执行 —— 板端 ruff 会刷出一整屏
 # EXE002 The file is executable but no shebang is present, 真正的 lint 错误被淹掉。
 # 这里统一: 所有 .py 去掉 x 位, 入口脚本与 tools/ 里的 shell/node 脚本保留 x 位。
-ssh "$HOST" "cd $REMOTE_DIR && tar -xzf $NEW_TGZ \
-    && find . -path ./.venv -prune -o -name '*.py' -exec chmod a-x {} + \
-    && chmod +x run_cron.sh run_dev.sh 2>/dev/null; \
-    chmod +x tools/*.sh tools/*.py 2>/dev/null; \
-    chown -R $REMOTE_USER:$REMOTE_USER . && echo unpacked" || rollback
+# 注意整段是 `set -euo pipefail` 的一条链, 任何一步失败都会让 ssh 返回非 0 从而回滚;
+# 千万不要再用 `;` 把 chmod 和 tar 拆成互不相关的独立命令。
+ssh "$HOST" "REMOTE_DIR='$REMOTE_DIR' REMOTE_USER='$REMOTE_USER' \
+    NEW_TGZ='$NEW_TGZ' NEW_LIST='$NEW_LIST' bash -s" <<'SH' || rollback
+set -euo pipefail
+cd "$REMOTE_DIR"
+tar -xzf "$NEW_TGZ"
+tar -tzf "$NEW_TGZ" | sort >"$NEW_LIST"
+find . -path ./.venv -prune -o -name '*.py' -exec chmod a-x {} +
+for f in run_cron.sh run_dev.sh; do
+    [ -f "$f" ] && chmod +x "$f"
+done
+for f in tools/*; do
+    case "$f" in
+        *.sh|*.py) chmod +x "$f" ;;
+    esac
+done
+chown -R "$REMOTE_USER:$REMOTE_USER" .
+echo unpacked
+SH
 
 echo "[deploy] 校验配置与可导入性"
 ssh "$HOST" "cd $REMOTE_DIR && sudo -u $REMOTE_USER .venv/bin/python -" \
