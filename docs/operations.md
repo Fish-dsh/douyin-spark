@@ -8,7 +8,6 @@
 - **置顶好友不受状态检测限制**：无论检测为已续/未续一律强制发送，避免重要联系人因误判断火花。
 - `engine` / `friends` 两个字段**已废弃**，代码不读取。
 - `headless` 必须 `false` + `display: ":99"`（Xvfb 有头），`health_check.check_headed_config` 会断言。
-- `display` 留空**不是**错误写法：含义是「用当前进程的 `DISPLAY`」（`run_cron.sh` 已 `export DISPLAY=:99`）。巡检的 `check_xvfb_display` 走同一套回落顺序（配置 → 环境），两边都拿不到时记 **skip（未核验）** 而不是 ok —— `systemctl is-active` 只证明「某个 Xvfb 在跑」，证明不了浏览器会用上它。
 
 ## 性能档位与传参（2026-11-01）
 
@@ -45,15 +44,12 @@
 | 0 | 成功 / 无待续好友 / 窗口外 | 结束 |
 | 1 | 一般异常 | 检查剩余时间后重试 1 次 |
 | 2 | 未登录 | 直接结束，不重试 |
-| 3 | 自愈后仍失败 | 冷却 180s 冷启动重跑（最多 3 轮） |
+| 3 | 发现覆盖不足、本机自愈成功、**需冷启动重跑补发** | 冷却 180s 冷启动重跑（最多 3 轮） |
 | 4 | 未获得 PID 锁（另一实例持锁） | 跳过，**不当作成功** |
-| 5 | 配置不可用（`accounts` 为空 / 条目没有 `name`） | 直接结束，不重试 |
 | 124 | 被 `timeout` 杀掉（挂死） | 不重试 |
 | 130 | 人工 Ctrl+C | 不重跑 |
 
 被 `timeout` 杀掉与撞锁这两种"看起来像结束"的情况都会显式返回非 0，就是为了避免静默断火。
-
-退出码 5 来自 `src/config.py::preflight()`。**历史事故（2026-11-02）**：`config.json` 被部署覆盖成 19 字节的桩，`accounts` 为空，那一晚实际发送 0 个好友，而 `spark.py` 只是 log 一句就 `return`（rc=0）—— `health_check` 判健康、`notify_cmd` 也没配，整条链上没有任何一个环节会出声。现在空 `accounts`、条目不是对象、条目没有 `name` 一律硬失败。
 
 ## 健康检查（堵静默失败）
 
@@ -65,7 +61,7 @@
 .venv/bin/python src/health_check.py --notify-only-on-change  # 状态翻转才提醒
 ```
 
-检查项：① `runtime/state.json` 的 `date` 等于今天（本地时）；② `runtime/spark.log` 含今天的日期，且 **`config.accounts` 里每个账号**都有当日收尾（`==== 账号 X 完成:`、`今日…没有需要续火花的好友, 账号 X 结束` 或明确的 `【账号 X … 跳过】`；跳过=该账号今日没续火花，同样判失败）。任一不满足即失败：打印诊断到 stderr、执行 `notify_cmd`（若配置）、退出码 1。**2026-10-04 修正**：老口径只统计"出现过完成行"的账号，于是账号 A 正常收尾就足以让整轮判健康——账号 B 被 `timeout` 杀在半路、5 人漏发也毫无告警。**任务还在跑时不判定**：`runtime/.spark.pid` 指向活的 `spark.py` 时直接退出 0 且不改 `.health_failed`（判定过早=假告警；陈旧锁/PID 复用不算运行中）。
+检查项：① `runtime/state.json` 的 `date` 等于今天（本地时）；② `runtime/spark.log` 含今天的日期，且 **`config.accounts` 里每个账号**都有当日收尾（`==== 账号 X 完成:`、`今日…没有需要续火花的好友, 账号 X 结束` 或明确的 `【账号 X … 跳过】`；跳过=该账号今日没续火花，同样判失败）；③ `config.json` 的 `headless` 必须是 `false` 且有 `display`（否则等于放弃 Xvfb 伪装）；④ 该 `display` 号上的 Xvfb 进程必须活着。任一不满足即失败：打印诊断到 stderr、执行 `notify_cmd`（若配置）、退出码 1。**2026-10-04 修正**：老口径只统计"出现过完成行"的账号，于是账号 A 正常收尾就足以让整轮判健康——账号 B 被 `timeout` 杀在半路、5 人漏发也毫无告警。**任务还在跑时不判定**：`runtime/.spark.pid` 指向活的 `spark.py` 时直接退出 0 且不改 `.health_failed`（判定过早=假告警；陈旧锁/PID 复用不算运行中）。
 
 cron 建议（部署机，晚于 00:00 主任务）：
 
@@ -86,7 +82,7 @@ cron 建议（部署机，晚于 00:00 主任务）：
 | 问题 | 说明 |
 | ---- | ---- |
 | 找不到好友 | 未命中完整匹配时自动回退到模糊文本 / `title` / `data-name` 属性兜底；仍失败则该好友标记 fail 跳过，不中断其他好友 |
-| 火花状态误判 | 火花检测基于图标 class（灰=需续，正常=已续），若抖音改版导致误判，需更新 `spark_status.py` 的选择器；**置顶好友已强制续，不受该误判影响** |
+| 火花状态误判 | 火花检测走四条策略（CSS 类名 → 文本特征 → 火焰图标 → 结构兜底），只有一条锚定抖音混淆后的类名；若改版导致误判，需更新 `spark_status.py` 的选择器。**置顶好友已强制续，不受该误判影响** |
 | 滑块验证 | 出现在密码自动登录时；脚本记录失败时间退避，下一次窗口重试 |
 | 内存不足 | 检查 swap/zram；确认禁 GPU 与 `block_resources: true`（**不要改成 headless**——有头跑在 Xvfb 上是为了绕开抖音拦截，改 headless 会渲染挂死漏发）；缩小 viewport；默认已开 `browser_reuse: true` 共享浏览器，若仍不足可观察 `runtime/spark.log` 的 `[mem:*]` 记录判断是否需要降低 `browser_recycle_mem_mb` 阈值或设 `browser_reuse: false` |
 | 连续出现 `rc=4` | `run_cron.sh` 记的「未获得 PID 锁」：正常只该在两个实例重叠时偶发；**连续多天**说明有进程挂死没释放锁 → 查 `runtime/.spark.pid` 里的 PID 是否存活（`ps -p`），必要时手工 kill 并删该文件（外圈已有 `timeout 90m` 兜底，长持锁会被杀成 rc=124） |
@@ -100,11 +96,11 @@ cron 建议（部署机，晚于 00:00 主任务）：
 - **月度回看**：`python tools/strat_stats.py --all --days 30` 一次读尽 `runtime/spark.log*`（含 `.gz`）；只读默认入口时它只看当前那份，历史轮转不会被统计。
 - **手动强制发送**：`python spark.py --force` 忽略发送窗口与今日幂等限制，立即尝试给所有需续好友发送（用于补发或测试）。
 - **发送链路验证**：`python spark.py --verify-send` 窗口内对**全部待续好友**（含置顶强制续）逐一真实发送并确认（会写 `state.json` 防重发，通过要求日志有「发送成功」正向证据）。
-- **重新登录**：登录态彻底失效时，重跑 `python login.py --password`（读 `login.py --password` 这条人工入口的 `.env`；无人值守路径的密码在 `config.json` 的 `accounts` 里），或 `python login.py --manual` 人工扫码。两者都用**当前 shell 的 `DISPLAY`**（不是 `config.json` 的 `display`）；部署机上 `:99` 由 `xvfb.service` 常驻着，所以那里写 `DISPLAY=:99 python login.py --manual`，或者直接 `login.py --manual --display :99`。
+- **重新登录**：登录态彻底失效时，重跑 `python login.py --password`（读 `login.py --password` 这条人工入口的 `.env`；无人值守路径的密码在 `config.json` 的 `accounts` 里），或 `python login.py --manual` 人工扫码。
 
 ## 开发与自检
 
-- **代码不写死好友昵称/手机号等隐私**。无人值守路径的凭据只放 `config.json` 的 `accounts`（chmod 600）；`.env` 仅服务人工入口 `login.py --password`，主链路不读它。
-- **发送内容固定**"续火花"，表情优先、文字兜底。发送确认按三级判据：列表新增气泡（硬证据）> 面板关闭但证据读不到（降级，日志标注）> 证据可读且零新增（判未发送，走文字兜底）。
+- **代码不写死好友昵称/手机号等隐私**，凭据只放 `.env`（chmod 600）与 `config.json`。
+- **发送内容固定**"续火花"，表情优先、文字兜底；「表情面板关闭」视为发送成功，不做消息数二次确认。
 - 某个设计为什么这么定，读对应模块文件头的注释。
 - 跑测试、lint、提交前自检见 [development.md](development.md)。

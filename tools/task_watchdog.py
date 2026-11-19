@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """task_watchdog:任务心跳的"读者",只诊断不干预。
 
-为什么需要它(2026-11-01):
+为什么需要它(2026-11-01,会话50):
     心跳文件 heartbeat.json 从 10 月就每晚在写, 但**没有任何程序读它** ——
     有数据、没消费者。外部评审的原话是"不需要再造一套监控系统,
     而是给现有数据增加一个独立的判定者", 这个脚本就是那个判定者。
@@ -103,11 +103,6 @@ def classify(hb: dict | None, now: datetime) -> tuple[str, str]:
     # 抖动期允许整段静默:那是睡着,不是卡死。
     if stage == "run_start" and age <= JITTER_MAX_SEC + 120:
         return "HEALTHY", f"抖动中(run_start {int(age)}s)"
-
-    # 终态:整轮跑完(scheduler 在 finally 前敲 all_done)。心跳停在这里是**正常**
-    # 而不是卡死 —— 2026-11-02 板端: 00:09 收尾, 01:20 被误判 STALE 4213s。
-    if stage == "all_done":
-        return "HEALTHY", f"本轮已正常收尾(心跳 {int(age)}s 前)"
 
     stage_ts = hb.get("stage_start_ts")
     try:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import time
 from urllib.parse import urlparse
 
 from playwright.sync_api import Browser, BrowserContext, Page
@@ -67,6 +68,11 @@ _MID_DROP = {
 }
 _MID_JS_FLAGS = "--js-flags=--max-old-space-size=1024 --max-semi-space-size=64"
 _MID_RENDERER_LIMIT = "--renderer-process-limit=2"
+
+
+# headless 默认值: False(有头 + 虚拟显示)。见 launch_browser 的说明 —— 漏写这个键
+# 时必须落到「抖音不拦」的那一侧, 而不是静默无头。
+DEFAULT_HEADLESS = False
 
 
 def build_launch_args(cfg: dict, headless: bool) -> list:
@@ -192,16 +198,15 @@ def free_page_memory(page: Page) -> None:
 def launch_browser(p, cfg: dict):
     """按 cfg 启动 chromium。
 
-    headless: 默认 False, 即以有头模式启动(用 Xvfb/WSLg 虚拟显示), 规避抖音对
-    headless chromium 的登录拦截页 —— 2026-09-24 实测拦截, 2026-09-30 弱机
-    headless 渲染挂死导致漏发。仅当显式写死 "headless": true 才会走无头。
+    headless: **默认 False(有头)**, 跑在 Xvfb/WSLg 虚拟显示上, 规避抖音对 headless
+    chromium 的登录拦截页(2026-09-24 实测)。2026-11-19 审计改默认值: 原默认 True 意味着
+    「配置里漏写这个键 = 静默用无头跑」, 与 AGENTS.md 硬约束①正面冲突, 而且只会在
+    第二天的巡检里才被发现(check_headed_config) —— 无人值守系统不该有这种静默降级。
+    真要无头(手工排障)必须显式写 "headless": true。
     display: 有头模式下注入 DISPLAY 环境变量(如板子 Xvfb :99)。
     perf_profile: low(板端档) / high(本机桌面档), 见 build_launch_args。
     """
-    # 默认有头: config.load_config 已把缺失的 headless 补成 False(硬约束见
-    # AGENTS.md), 这里再跟一手, 免得绕过 load_config 直接调本函数时又悄悄
-    # 退回 headless —— 那正是会被抖音拦截页挡住、弱机渲染挂死的那条路。
-    headless = bool(cfg.get("headless", False))
+    headless = bool(cfg.get("headless", DEFAULT_HEADLESS))
     args = build_launch_args(cfg, headless)
     if not headless:
         display = cfg.get("display")
@@ -223,8 +228,10 @@ def open_session(
     account: 包含 name, storage_file 等信息的账号配置
     """
     new_browser = browser is None
+    _t_launch = time.monotonic()
     if new_browser:
         browser = launch_browser(p, cfg)
+    _t_nav = time.monotonic()
     storage_file = get_account_storage_file(account)
     context = None
     try:
@@ -239,10 +246,20 @@ def open_session(
                 NetSniffer(account.get("name", "default")).attach(page)
             except Exception as exc:
                 log(f"[sniff] 嗅探器挂载失败(忽略): {exc}")
+        _t_goto = time.monotonic()
         page.goto(CHAT_URL, wait_until="commit", timeout=perf.ms("goto_ms"))
         page.wait_for_timeout(perf.ms("settle_ms"))
         if not is_logged_in(page):
             _ensure_login(browser, page, cfg, account)
+        # 板端固定开销占一夜 45%(见 docs/notes/board-perf.md), 但「冷启动 / 导航 /
+        # 页面初始化」谁占大头一直只是推断。这一行三阶段计时就是为了把它一次问清,
+        # 不加埋点系统、不改任何就绪判据。发现阶段还会再补一行「列表就绪」。
+        _t_ready = time.monotonic()
+        log(
+            f"[timing] 会话建立 启动 {_t_nav - _t_launch:.1f}s / "
+            f"建页导航 {_t_goto - _t_nav:.1f}s / 落地就绪 {_t_ready - _t_goto:.1f}s"
+            f"(合计 {_t_ready - _t_launch:.1f}s)"
+        )
     except BaseException:
         if context is not None:
             try:

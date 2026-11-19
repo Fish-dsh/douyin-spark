@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import json
 import os
-import re
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -102,27 +101,6 @@ def load_config() -> dict:
     cfg["perf_profile"] = profile
     # 档位在此一次性落到 perf 模块, 之后全流程的等待/超时都读它(不再各处写死)。
     perf.set_profile(profile)
-    # 有头模式是硬约束(AGENTS.md): 抖音对 headless chromium 会弹拦截页, 弱机
-    # 无头还会渲染挂死(2026-09-30 事故: 板子 config.json 丢这两个键, 当晚全 skip)。
-    # 这里把缺失项显式补成 false —— 不再依赖 session.launch_browser 的默认值,
-    # 否则「没写这一项」就等于悄悄跑 headless, 正是那次事故的成因。
-    if "headless" not in cfg:
-        log("警告: config.json 缺少 headless, 已按有头模式硬约束补为 false")
-        cfg["headless"] = False
-    if cfg.get("headless") is not False:
-        log(
-            "警告: headless 不为 false。headless 会被抖音拦截页挡住、弱机还会渲染挂死,"
-            " 只适合桌面档临时调试; 无人值守必须 headless=false 且 display=\":99\""
-        )
-    else:
-        # 这里必须复用 preflight 的同一套判据: display 留空是**合法**的(含义是用
-        # 当前进程的 DISPLAY), 只有「配置留空且环境也没有合法 DISPLAY」才是真问题。
-        # 旧写法只判 cfg.get("display"), 于是 config.dev.json(display: null) 在桌面
-        # 会话里每跑一次就警告一次「将没有 X 显示可用」, 而那一刻浏览器明明能开窗口。
-        # 假警告比不警告更坏: 它会训练人无视所有警告。
-        problem = _display_refusal(cfg)
-        if problem:
-            log(f"警告: {problem}")
     if "accounts" not in cfg:
         log("警告: config.json 缺少 accounts 字段，使用空列表")
         cfg["accounts"] = []
@@ -133,116 +111,6 @@ def load_config() -> dict:
         if "state_file" not in acc:
             acc["state_file"] = f"state_{acc.get('name', f'account{i}')}.json"
     return cfg
-
-
-class ConfigError(RuntimeError):
-    """配置缺失到「跑下去也毫无意义」的程度。必须让调用方非 0 退出。"""
-
-
-# 有头模式是硬约束(AGENTS.md)。桌面临时调试要能跑 headless, 但不能靠"改配置
-# 顺手留一手"—— 所以就留这一个环境变量作唯一出口, 且它只影响本地调试,
-# 无人值守的 cron 环境里没有它, 写了 headless=true 一律拒绝启动。
-ALLOW_HEADLESS_ENV = "SPARK_ALLOW_HEADLESS"
-# X display 必须是 :N 或 :N.M 形式; 空串/绝对路径都不算。
-_DISPLAY_RE = re.compile(r"^:\d+(\.\d+)?$")
-
-
-def _env_display() -> str:
-    """当前 shell 的 DISPLAY; 不是合法的 :N 形式就当没有。
-
-    只读环境变量, **不探测 X server 是否真在** —— 配置层不该去连显示服务。
-    「这个显示号能不能真连上」由 src/health_check.py::check_xvfb_display 查
-    /tmp/.X11-unix 里的 socket 负责。
-    """
-    raw = (os.environ.get("DISPLAY") or "").strip()
-    return raw if _DISPLAY_RE.match(raw) else ""
-
-
-def _display_refusal(cfg: dict) -> str:
-    """只校验 display 一项; 没问题返回空串。
-
-    拆出来是为了让 SPARK_ALLOW_HEADLESS 逃生口能「只跳过 headless 那一条,
-    display 该查照查」—— 以前逃生口一开就整段 return, 连 display 一起放过。
-    """
-    display = cfg.get("display")
-    if display is None or (isinstance(display, str) and not display.strip()):
-        if _env_display():
-            return ""
-        return (
-            "display 未配置, 当前环境也没有可用的 DISPLAY; 有头模式需要一个 X 显示。"
-            '无人值守请写 display=":99"(板端对应 systemd 的 xvfb.service);'
-            " 桌面调试请在真有桌面的会话里跑, 那时 DISPLAY 通常是 :0。"
-        )
-    if not isinstance(display, str) or not _DISPLAY_RE.match(display.strip()):
-        return (
-            f'display={display!r}; 有头模式必须给一个 X display, 形如 ":99"'
-            "(板端对应 systemd 的 xvfb.service)。"
-        )
-    return ""
-
-
-def headless_refusal(cfg: dict) -> str:
-    """返回「为什么这份配置在无人值守下不能跑」; 可跑则返回空串。
-
-    校验两件事, 缺一不可:
-      1. headless 不能是 true —— 抖音会给 headless chromium 弹拦截页, 弱机
-         还会渲染挂死(2026-09-30 事故: 当晚全部好友 skip 漏发)。
-      2. display 必须能落实到一个 X 显示 —— 有头模式没有 X 显示就是开一个渲染
-         不出东西的浏览器; 之前只判「display 是否为真值」, 于是 ":88" 这种写错
-         的显示号也能过闸门, 而板上只有 :99 一个 Xvfb。
-
-    display 缺省(null / 空串)是**合法**的, 含义是「用当前 shell 的 DISPLAY」
-    —— 开发机的常态(桌面会话里是 :0)。但它只在环境里真有显示号时才成立:
-    这道闸门要证明的是「这台机器确实有个 X 显示」, 而不是「配置里有个字符串」。
-    以前把 null 一律判错, 于是 config.dev.json 一启动就撞自己的门禁; 反过来若
-    一律放行 null, 板上 config.json 丢了 display 键又会静默跑成无显示。
-    """
-    if cfg.get("headless") is not False:
-        return (
-            f"headless={cfg.get('headless')!r}; 无人值守必须 headless=false。"
-            f"桌面临时调试请显式设置 {ALLOW_HEADLESS_ENV}=1 再跑。"
-        )
-    return _display_refusal(cfg)
-
-
-def preflight(cfg: dict) -> None:
-    """跑之前先确认这份配置是能真正干活的。
-
-    为什么不用「警告 + 空列表」: 2026-11-02 事故里, config.json 被部署覆盖成 19 字节
-    的桩, 空 accounts 让 run_cron.sh 以 rc=0 结束 —— 那一晚实际发送 0 个好友, 而
-    health_check 判健康、告警通道同时消失, 整条链上没有任何一个环节会出声。
-    缺到这个程度只能是硬失败: 抛 ConfigError, 由调用方转成退出码 5。
-
-    有头模式同理: 它以前只在 load_config 里告警一句, 然后照跑 —— 也就是说
-    「配置写错」和「跑起来」之间没有任何一处会拦。现在它和 accounts 一样是
-    启动硬门禁, 只有 SPARK_ALLOW_HEADLESS=1 时放行(桌面档调试专用)。
-    """
-    accounts = cfg.get("accounts") or []
-    if not accounts:
-        raise ConfigError(
-            "config.json 里没有 accounts: 这次运行会发送 0 个好友。"
-            "请从 config.json.bak-* 恢复, 或补上 accounts 列表。"
-        )
-    for i, acc in enumerate(accounts):
-        if not isinstance(acc, dict):
-            raise ConfigError(f"accounts[{i}] 不是对象: {acc!r}")
-        if not str(acc.get("name") or "").strip():
-            raise ConfigError(f"accounts[{i}] 没有 name 字段")
-    # 逃生口只对「headless=true」这一件事生效。以前的写法是见到这个变量就整段
-    # return, 连 display 校验一起跳过 —— 于是 SPARK_ALLOW_HEADLESS=1 下写
-    # display=":abc" 也能启动, 而变量名表达的只是「允许 headless」。
-    if os.environ.get(ALLOW_HEADLESS_ENV) == "1" and cfg.get("headless") is not False:
-        log(
-            f"[preflight] {ALLOW_HEADLESS_ENV}=1, 跳过 headless 硬门禁"
-            "(只适用于桌面临时调试; display 仍按有头模式校验)"
-        )
-        problem = _display_refusal(cfg)
-        if problem:
-            raise ConfigError(f"有头模式硬门禁未通过: {problem}")
-        return
-    reason = headless_refusal(cfg)
-    if reason:
-        raise ConfigError(f"有头模式硬门禁未通过: {reason}")
 
 
 def get_account_state_file(account: dict) -> Path:

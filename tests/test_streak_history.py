@@ -175,7 +175,11 @@ class TestCheckStreakHistory(unittest.TestCase):
         self._write_history(
             {
                 prev: {"discovered": ["甲"], "sent": ["甲"], "failed": []},
-                today: {"discovered": ["甲", "FRIEND_M", "FRIEND_L"], "sent": [], "failed": []},
+                today: {
+                    "discovered": ["甲", "FRIEND_M", "FRIEND_L"],
+                    "sent": [],
+                    "failed": [],
+                },
             }
         )
         missing, detail = streak_history.check_streak_history("main")

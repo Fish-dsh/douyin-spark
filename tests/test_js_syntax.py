@@ -24,7 +24,7 @@ class TestJsSyntax(unittest.TestCase):
         self.assertGreater(len(found), 10, "没扫到 JS 常量, 扫描器本身坏了")
         names = {name for _, name, _ in found}
         self.assertIn("_JS_INJECT_AND_SEND", names)
-        self.assertIn("_JS_CLICK_STICKER", names)
+        self.assertIn("_JS_FIND_STICKER", names)
 
     @unittest.skipUnless(check_js.node_available(), "没装 node, JS 语法检查跳过")
     def test_all_js_parses(self):

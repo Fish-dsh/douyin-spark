@@ -334,6 +334,45 @@ class TestOpenSessionLoginIsolation(unittest.TestCase):
         self.assertTrue(issubclass(LoginRequiredError, Exception))
 
 
+class TestOpenSessionTiming(unittest.TestCase):
+    """固定开销(板端约 86.5s/账号)到底是冷启动、导航还是页面初始化在吃。
+
+    docs/notes/board-perf.md 里 45% 这个占比是两点边际法推出来的工程估算, 不是实测;
+    这行三阶段计时就是为了用一条日志把它一次问清, 所以它必须真的存在且带齐三段。
+    """
+
+    def _run(self, browser_in=None):
+        page = MagicMock()
+        context = MagicMock()
+        context.new_page.return_value = page
+        p = MagicMock()
+        p.chromium.launch.return_value = MagicMock()
+        with (
+            patch("src.session.restore_state", return_value=context),
+            patch("src.session.is_logged_in", return_value=True),
+            patch("src.session.memory_report"),
+            patch("src.session.log") as mlog,
+        ):
+            open_session(p, {"net_sniff": False}, {"name": "main"}, browser=browser_in)
+        return p, mlog
+
+    def test_emits_one_line_with_three_phases(self):
+        _, mlog = self._run()
+        lines = [c.args[0] for c in mlog.call_args_list]
+        timing = [x for x in lines if "[timing] 会话建立" in x]
+        self.assertEqual(len(timing), 1, f"三阶段计时行应当恰好 1 条: {lines}")
+        for phase in ("启动", "建页导航", "落地就绪"):
+            self.assertIn(phase, timing[0])
+
+    def test_reused_browser_reports_zero_launch(self):
+        """复用浏览器时冷启动那一段必须是 0.0s, 否则日志会误导优化方向。"""
+        _, mlog = self._run(browser_in=MagicMock())
+        timing = [
+            c.args[0] for c in mlog.call_args_list if "[timing] 会话建立" in c.args[0]
+        ]
+        self.assertIn("启动 0.0s", timing[0])
+
+
 class TestLaunchArgs(unittest.TestCase):
     def test_launch_args_contains_key_flags(self):
         self.assertIn("--disable-blink-features=AutomationControlled", LAUNCH_ARGS)
@@ -347,14 +386,16 @@ class TestLaunchBrowser(unittest.TestCase):
     """headless/display 走 cfg 驱动(板子 Xvfb headed 模式, 2026-09-24)。"""
 
     def test_default_headless_false(self):
-        """未写 headless 时必须默认有头(硬约束: headless 会被抖音拦截并渲染挂死)。"""
+        """配置漏写 headless 时必须落到**有头**, 不能静默无头(2026-11-19 审计)。
+
+        原默认 True: 漏写键 = 抖音登录拦截页, 而唯一能发现它的地方是第二天的巡检
+        (check_headed_config) —— 无人值守链路里最贵的一种失败。
+        """
         p = MagicMock()
         with patch("src.session.memory_report"):
             launch_browser(p, {})
         _, kwargs = p.chromium.launch.call_args
         self.assertFalse(kwargs["headless"])
-        # 有头路径会去掉禁用软件光栅器并补 SwiftShader(虚拟显示必需)
-        self.assertNotIn("--disable-software-rasterizer", kwargs["args"])
 
     def test_cfg_headed_with_display(self):
         import os

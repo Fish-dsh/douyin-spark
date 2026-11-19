@@ -13,12 +13,12 @@ from datetime import datetime
 from pathlib import Path
 from unittest.mock import ANY, MagicMock, call, patch
 
+from src import runtime_lock as _lock_mod
 from src import scheduler as _scheduler_mod
 from src.config import in_window
 from src.discovery import RenderHangDetected
 from src.scheduler import (
     _HEALABLE_ERRORS,
-    _acquire_pid_lock,
     _heal_after_send_failure,
     _merge_rc,
     _send_phase,
@@ -267,6 +267,109 @@ class TestProcessFriend(unittest.TestCase):
         mock_click.assert_not_called()
 
 
+class TestFriendTimingBreakdown(unittest.TestCase):
+    """2026-11-19: 单好友耗时日志必须带阶段细分。
+
+    板端一夜的实测只到「每个好友 27s」这一层, 27s 里是渲染、表情面板还是发送
+    确认, 日志上看不出来 —— 于是任何优化都只能靠猜。这条守住细分不被删回一句。
+    """
+
+    def test_timing_line_carries_stage_breakdown(self):
+        page = MagicMock()
+        with (
+            patch("src.scheduler.wait_chat_ui", return_value=True),
+            patch("src.scheduler.wait_chat_list", return_value=True),
+            patch("src.scheduler.click_friend", return_value=MagicMock()),
+            patch("src.scheduler.send_sticker", return_value=(True, "表情已发送")),
+            patch("src.login.is_logged_in", return_value=True),
+            patch("src.scheduler.log") as mock_log,
+        ):
+            status, sent = process_friend(page, {"name": "main"}, "某某", False)
+
+        self.assertEqual((status, sent), ("ok", True))
+        timing = [
+            str(c.args[0])
+            for c in mock_log.call_args_list
+            if c.args and "process_friend(某某) 耗时" in str(c.args[0])
+        ]
+        self.assertEqual(len(timing), 1, "多个 return 出口只允许印一行耗时")
+        for stage in ("打开页面", "定位好友", "打开会话", "表情"):
+            self.assertIn(stage, timing[0], f"缺阶段 {stage}: {timing[0]}")
+
+
+class TestDiscoveryHandoff(unittest.TestCase):
+    """2026-11-19: 发现阶段的会话整页交给发送阶段第一个好友。
+
+    板端一夜要付两次 chromium 冷启动 + 两次整页加载(发现一次、发送一次);
+    发现结束时的页面正好停在聊天页、会话列表就绪, 直接接手即可省掉其中一次。
+    """
+
+    def _run_send_phase(self, first_session, usable):
+        state = {"date": "2026-11-19", "sent": []}
+        with (
+            patch("src.scheduler.open_session") as mock_open,
+            patch("src.scheduler.process_friend", return_value=("ok", True)),
+            patch("src.scheduler.save_session_state"),
+            patch("src.scheduler.close_session") as mclose,
+            patch("src.scheduler.free_page_memory"),
+            patch("src.scheduler.memory_report"),
+            patch("src.scheduler.available_mb", return_value=2048),
+            patch("src.scheduler.write_state"),
+            patch("src.scheduler._page_usable", return_value=usable),
+        ):
+            mock_open.return_value = (MagicMock(), MagicMock(), MagicMock())
+            out = _send_phase(
+                None,
+                {"browser_reuse": True},
+                {"name": "main"},
+                state,
+                ["A"],
+                False,
+                first_session=first_session,
+            )
+        return out, mock_open, mclose
+
+    def test_first_friend_reuses_discovery_page(self):
+        session = (MagicMock(), MagicMock(), MagicMock())
+        out, mock_open, _ = self._run_send_phase(session, usable=True)
+        self.assertEqual(out[0], 1, "好友应发送成功")
+        mock_open.assert_not_called()
+
+    def test_unusable_discovery_page_is_discarded_and_reopened(self):
+        session = (MagicMock(), MagicMock(), MagicMock())
+        out, mock_open, mclose = self._run_send_phase(session, usable=False)
+        self.assertEqual(out[0], 1)
+        mock_open.assert_called_once()
+        closed = [c.args for c in mclose.call_args_list]
+        self.assertIn((None, session[1]), closed, "不可用的交接页必须关掉 context")
+
+    def test_process_account_closes_handoff_when_nothing_pending(self):
+        session = (MagicMock(), MagicMock(), MagicMock())
+        _guard_real_heal_side_effects(self)
+        with (
+            patch(
+                "src.scheduler._discover_with_hang_retry",
+                return_value=([], 0, session),
+            ),
+            patch("src.scheduler._close_handoff") as mclose,
+            patch("src.scheduler.load_state", return_value={"date": "2026-11-19"}),
+            patch("src.scheduler.write_state"),
+            patch("src.scheduler.in_window", return_value=True),
+        ):
+            rc = process_account(
+                {"name": "main"},
+                {},
+                datetime(2026, 11, 19, 0, 5),
+                "23:30",
+                "00:30",
+                False,
+                False,
+                False,
+            )
+        self.assertEqual(rc, 0)
+        mclose.assert_called_with(session)
+
+
 class TestHealableErrors(unittest.TestCase):
     def test_healable_errors_tuple(self):
         self.assertIn(TimeoutError, _HEALABLE_ERRORS)
@@ -307,8 +410,6 @@ class TestRunArgumentParsing(unittest.TestCase):
 
         cfg = {
             "send_window": {"start": "23:30", "end": "00:30"},
-            "headless": False,
-            "display": ":99",
             "accounts": [{"name": "main", "account": "a", "password": "b"}],
         }
 
@@ -345,8 +446,6 @@ class TestRunBrowserReuse(unittest.TestCase):
         self.cfg = {
             "send_window": {"start": "23:30", "end": "00:30"},
             "browser_reuse": True,
-            "headless": False,
-            "display": ":99",
             "accounts": [{"name": "main", "account": "a", "password": "b"}],
         }
         self.addCleanup(self.patcher_playwright.stop)
@@ -533,8 +632,6 @@ class TestRunVerifySend(unittest.TestCase):
         self.mock_playwright.return_value.__enter__.return_value = self.p
         self.cfg = {
             "send_window": {"start": "23:30", "end": "00:30"},
-            "headless": False,
-            "display": ":99",
             "accounts": [{"name": "main", "account": "a", "password": "b"}],
         }
         self.addCleanup(self.patcher_playwright.stop)
@@ -732,8 +829,6 @@ class TestRunDefaultBrowser(unittest.TestCase):
         self.cfg = {
             "send_window": {"start": "23:30", "end": "00:30"},
             "browser_reuse": False,
-            "headless": False,
-            "display": ":99",
             "accounts": [{"name": "main", "account": "a", "password": "b"}],
         }
         self.addCleanup(self.patcher_playwright.stop)
@@ -987,11 +1082,14 @@ class TestDiscoverWithHangRetry(unittest.TestCase):
             patch("src.scheduler.close_session") as mclose,
             patch("src.scheduler.memory_report"),
         ):
-            pending, rc = self._call()
+            pending, rc, session = self._call()
         self.assertEqual((pending, rc), (["甲"], 0))
         mos.assert_called_once()
         msave.assert_called_once()
-        mclose.assert_called_once()
+        # 2026-11-19 起: 发现成功不再关浏览器 —— 页面整体交给发送阶段第一个好友,
+        # 省一次冷启动 + 一次整页加载(见 _discover_with_hang_retry 的 docstring)。
+        mclose.assert_not_called()
+        self.assertEqual(session, (1, 2, 3), "成功时必须把会话交出去")
 
     def test_render_hang_then_success(self):
         with (
@@ -1003,8 +1101,9 @@ class TestDiscoverWithHangRetry(unittest.TestCase):
             patch("src.scheduler.close_session"),
             patch("src.scheduler.memory_report"),
         ):
-            pending, rc = self._call()
+            pending, rc, session = self._call()
         self.assertEqual((pending, rc), (["甲"], 0))
+        self.assertIsNotNone(session, "重开成功后同样要把会话交给发送阶段")
         self.assertEqual(mos.call_count, 2, "挂死一次后应重开会话")
 
     def test_render_hang_exhausted_returns_1(self):
@@ -1016,8 +1115,9 @@ class TestDiscoverWithHangRetry(unittest.TestCase):
             patch("src.scheduler.close_session"),
             patch("src.scheduler.memory_report"),
         ):
-            pending, rc = self._call()
+            pending, rc, session = self._call()
         self.assertEqual((pending, rc), ([], 1))
+        self.assertIsNone(session, "失败路径不能把半死会话交出去")
         self.assertEqual(mos.call_count, 3, "首次+2次重开")
         mdis.assert_not_called()
         self.assertEqual(mdis.call_count, 0)
@@ -1028,8 +1128,9 @@ class TestDiscoverWithHangRetry(unittest.TestCase):
             patch("src.scheduler.close_session") as mclose,
             patch("src.scheduler.memory_report"),
         ):
-            pending, rc = self._call()
+            pending, rc, session = self._call()
         self.assertEqual((pending, rc), ([], 1))
+        self.assertIsNone(session, "失败路径不能把半死会话交出去")
         mclose.assert_called_once()
 
     def test_login_required_returns_2(self):
@@ -1047,8 +1148,9 @@ class TestDiscoverWithHangRetry(unittest.TestCase):
             patch("src.scheduler.memory_report"),
             patch("src.scheduler.dump_page", return_value=""),
         ):
-            pending, rc = self._call()
+            pending, rc, session = self._call()
         self.assertEqual((pending, rc), ([], 2))
+        self.assertIsNone(session, "登录失效同样不交会话")
         mclose.assert_called_once()
 
 
@@ -1149,8 +1251,6 @@ class TestLoginFailureIsolation(unittest.TestCase):
     def test_run_logged_out_account_does_not_skip_later_accounts(self):
         cfg = {
             "send_window": {"start": "23:30", "end": "00:30"},
-            "headless": False,
-            "display": ":99",
             "accounts": [
                 {"name": "first", "account": "a", "password": "b"},
                 {"name": "second", "account": "c", "password": "d"},
@@ -1185,8 +1285,8 @@ class TestLoginFailureIsolation(unittest.TestCase):
             patch("src.scheduler.dump_page", return_value=""),
             patch("src.scheduler.close_session"),
             patch("src.scheduler.memory_report"),
-            patch("src.scheduler._acquire_pid_lock", return_value=True),
-            patch("src.scheduler._release_pid_lock"),
+            patch("src.runtime_lock.acquire", return_value=True),
+            patch("src.runtime_lock.release"),
             patch("src.scheduler._heartbeat"),
         ):
             mp.return_value.__enter__.return_value = MagicMock()
@@ -1205,11 +1305,7 @@ class TestEmptyPendingNightRecord(unittest.TestCase):
     """
 
     def _invoke(self, msave, mgap):
-        cfg = {
-            "send_window": {"start": "23:30", "end": "00:30"},
-            "headless": False,
-            "display": ":99",
-        }
+        cfg = {"send_window": {"start": "23:30", "end": "00:30"}}
         account = {"name": "main", "account": "a", "password": "b"}
         with (
             patch("src.scheduler.sync_playwright"),
@@ -1218,7 +1314,9 @@ class TestEmptyPendingNightRecord(unittest.TestCase):
                 return_value={"date": "2026-10-07", "sent": []},
             ),
             patch("src.scheduler.write_state"),
-            patch("src.scheduler._discover_with_hang_retry", return_value=([], 0)),
+            patch(
+                "src.scheduler._discover_with_hang_retry", return_value=([], 0, None)
+            ),
             patch("src.scheduler._coverage_gate", return_value=0),
             patch("src.scheduler.streak_history.save_daily_record", side_effect=msave),
             patch(
@@ -1226,7 +1324,6 @@ class TestEmptyPendingNightRecord(unittest.TestCase):
             ),
         ):
             return process_account(
-                None,
                 account,
                 cfg,
                 datetime(2026, 10, 7, 0, 5),
@@ -1387,7 +1484,7 @@ class TestPidLockExemption(unittest.TestCase):
     → 每次 AI 修复都被判 `noevidence` 并回滚(自愈从未真正生效)。获锁失败裸 return 也让
     "锁被挂死实例长期持有"在监控面完全静默。
 
-    隔离手法: `_acquire_pid_lock()` 按 `os.path.dirname(os.path.dirname(__file__))` 定位
+    隔离手法: `_lock_mod.acquire()` 按 `os.path.dirname(os.path.dirname(__file__))` 定位
     runtime/, 故把模块 `__file__` 指向临时目录即可完全隔离 —— **绝不碰生产
     runtime/.spark.pid**, 否则测试会在板子上真抢走运行锁。
     """
@@ -1408,11 +1505,11 @@ class TestPidLockExemption(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpd:
             proj = self._mk_proj(tmpd)
             with (
-                patch.object(_scheduler_mod, "__file__", self._fake_file(proj)),
-                patch.object(_scheduler_mod, "_PID_FILE", None),
+                patch.object(_lock_mod, "__file__", self._fake_file(proj)),
+                patch.object(_lock_mod, "_LOCK_FILE", ""),
                 patch.dict(os.environ, {"SPARK_SKIP_PID_LOCK": "1"}),
             ):
-                self.assertTrue(_acquire_pid_lock())
+                self.assertTrue(_lock_mod.acquire())
             self.assertFalse(self._lock_file(proj).exists(), "豁免进程不得写锁文件")
             self.assertFalse(
                 (proj / "runtime").exists(), "豁免进程连 runtime/ 都不该创建"
@@ -1425,15 +1522,15 @@ class TestPidLockExemption(unittest.TestCase):
             lock.parent.mkdir(parents=True, exist_ok=True)
             lock.write_text(str(os.getpid()), encoding="utf-8")  # 本测试进程=活持锁者
             with (
-                patch.object(_scheduler_mod, "__file__", self._fake_file(proj)),
-                patch.object(_scheduler_mod, "_PID_FILE", None),
+                patch.object(_lock_mod, "__file__", self._fake_file(proj)),
+                patch.object(_lock_mod, "_LOCK_FILE", ""),
                 # 新语义(2026-10-04): 锁里的 PID 存活还不够, 必须 cmdline 含 spark.py
                 # 才算"另一实例"。这里显式模拟"持锁者确实是 spark.py"。
-                patch.object(_scheduler_mod, "_pid_is_spark", return_value=True),
+                patch.object(_lock_mod, "pid_is_spark", return_value=True),
                 patch.dict(os.environ),
             ):
                 os.environ.pop("SPARK_SKIP_PID_LOCK", None)
-                self.assertFalse(_acquire_pid_lock())
+                self.assertFalse(_lock_mod.acquire())
             self.assertEqual(
                 lock.read_text(encoding="utf-8"),
                 str(os.getpid()),
@@ -1448,37 +1545,37 @@ class TestPidLockExemption(unittest.TestCase):
             lock.parent.mkdir(parents=True, exist_ok=True)
             lock.write_text(str(os.getpid()), encoding="utf-8")
             with (
-                patch.object(_scheduler_mod, "__file__", self._fake_file(proj)),
-                patch.object(_scheduler_mod, "_PID_FILE", None),
+                patch.object(_lock_mod, "__file__", self._fake_file(proj)),
+                patch.object(_lock_mod, "_LOCK_FILE", ""),
                 patch.dict(os.environ),
             ):
                 os.environ.pop("SPARK_SKIP_PID_LOCK", None)
-                self.assertTrue(_acquire_pid_lock())
+                self.assertTrue(_lock_mod.acquire())
             self.assertEqual(lock.read_text(encoding="utf-8"), str(os.getpid()))
 
     def test_stale_by_age_is_reclaimed(self):
-        """锁里是存活 PID, 但锁文件年龄超过 _PID_STALE_SEC → 直接接管(兜住 PID 复用)。"""
+        """锁里是存活 PID, 但锁文件年龄超过 PID_STALE_SEC → 直接接管(兜住 PID 复用)。"""
         with tempfile.TemporaryDirectory() as tmpd:
             proj = self._mk_proj(tmpd)
             lock = self._lock_file(proj)
             lock.parent.mkdir(parents=True, exist_ok=True)
             lock.write_text(str(os.getpid()), encoding="utf-8")
-            old = time.time() - (_scheduler_mod._PID_STALE_SEC + 3600)  # 4 小时前
+            old = time.time() - (_lock_mod.PID_STALE_SEC + 3600)  # 4 小时前
             os.utime(lock, (old, old))
             with (
-                patch.object(_scheduler_mod, "__file__", self._fake_file(proj)),
-                patch.object(_scheduler_mod, "_PID_FILE", None),
+                patch.object(_lock_mod, "__file__", self._fake_file(proj)),
+                patch.object(_lock_mod, "_LOCK_FILE", ""),
                 patch.dict(os.environ),
             ):
                 os.environ.pop("SPARK_SKIP_PID_LOCK", None)
-                self.assertTrue(_acquire_pid_lock())
+                self.assertTrue(_lock_mod.acquire())
             self.assertEqual(lock.read_text(encoding="utf-8"), str(os.getpid()))
 
     def test_stale_lock_is_reclaimed(self):
-        # 用一个"肯定不存在"的 PID 模拟挂死实例留下的陈旧锁。判定走源码的
-        # _pid_alive(不写 os.kill(pid,0): Windows 上那是 CTRL_C_EVENT, 会打断单测)。
+        # 用一个"肯定不存在"的 PID 模拟挂死实例留下的陈旧锁。
+        # 按 /proc 判定而非 os.kill: 后者对**别人**的进程返回 EPERM, 会被误当"已死"。
         dead_pid = next(
-            p for p in range(999_999, 1_000, -1) if not _scheduler_mod._pid_alive(p)
+            p for p in range(999_999, 1_000, -1) if not Path(f"/proc/{p}").exists()
         )
         with tempfile.TemporaryDirectory() as tmpd:
             proj = self._mk_proj(tmpd)
@@ -1486,26 +1583,20 @@ class TestPidLockExemption(unittest.TestCase):
             lock.parent.mkdir(parents=True, exist_ok=True)
             lock.write_text(str(dead_pid), encoding="utf-8")
             with (
-                patch.object(_scheduler_mod, "__file__", self._fake_file(proj)),
-                patch.object(_scheduler_mod, "_PID_FILE", None),
+                patch.object(_lock_mod, "__file__", self._fake_file(proj)),
+                patch.object(_lock_mod, "_LOCK_FILE", ""),
                 patch.dict(os.environ),
             ):
                 os.environ.pop("SPARK_SKIP_PID_LOCK", None)
-                self.assertTrue(_acquire_pid_lock())
+                self.assertTrue(_lock_mod.acquire())
             self.assertEqual(lock.read_text(encoding="utf-8"), str(os.getpid()))
-
-    @staticmethod
-    def _pid_alive(pid: int) -> bool:
-        # 走源码里的跨平台实现: Windows 上 os.kill(pid, 0) 是 CTRL_C_EVENT,
-        # 会把 Ctrl+C 广播进控制台进程组、打断正在跑的单测。
-        return _scheduler_mod._pid_alive(pid)
 
     CHILD_SNIPPET = (
         "import os, sys\n"
-        "from src import scheduler as s\n"
+        "from src import runtime_lock as s\n"
         "s.__file__ = sys.argv[1]\n"
-        "s._PID_FILE = None\n"
-        "print('ACQ=%s' % s._acquire_pid_lock())\n"
+        "s._LOCK_FILE = ''\n"
+        "print('ACQ=%s' % s.acquire())\n"
     )
 
     def _child_acquire(self, proj: Path, exempt: bool) -> str:
@@ -1555,17 +1646,15 @@ class TestPidLockExemption(unittest.TestCase):
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
-        for _ in range(200):  # 等辅助进程真起来, 确保写锁时该 PID 一定存活
-            if _scheduler_mod._pid_alive(proc.pid):
+        for _ in range(200):  # 等 /proc 条目出现, 确保写锁时该 PID 一定存活
+            if Path(f"/proc/{proc.pid}/cmdline").exists():
                 break
             time.sleep(0.02)
         return proc
 
     @unittest.skipUnless(
         sys.platform.startswith("linux"),
-        "只在 Linux 上有意义: 判定持锁者是否 spark.py 靠 /proc/<pid>/cmdline, "
-        "其他平台读不到 → _pid_is_spark 返回 False → 锁按陈旧接管(见 src/scheduler.py)。"
-        "生产无人值守只跑在板子上, 这里不给开发机伪造一套进程枚举。",
+        "需要 /proc/<pid>/cmdline 才能证明持锁者是 spark.py",
     )
     def test_child_process_is_blocked_by_parent_lock(self):
         """跨进程复现原缺陷前提: 持锁者是**真正的 spark.py** 时, 未豁免的子进程确实争锁失败。
@@ -1587,27 +1676,6 @@ class TestPidLockExemption(unittest.TestCase):
                 holder.terminate()
                 holder.wait(timeout=10)
 
-    def test_live_lock_of_unverifiable_pid_is_reclaimed(self):
-        """非 Linux 上活 PID 也无法确认是不是 spark.py → 按陈旧锁接管(跨平台既定语义)。
-
-        这条与上一条是同一逻辑的两面: Linux 用 /proc 认得出持锁者, 那就必须挡住
-        第二个实例; 认不出时宁可接管也不能让一把来路不明的活锁长期堵死无人值守任务。
-        """
-        with tempfile.TemporaryDirectory() as tmpd:
-            proj = self._mk_proj(tmpd)
-            lock = self._lock_file(proj)
-            lock.parent.mkdir(parents=True, exist_ok=True)
-            lock.write_text(str(os.getpid()), encoding="utf-8")
-            with (
-                patch.object(_scheduler_mod, "__file__", self._fake_file(proj)),
-                patch.object(_scheduler_mod, "_PID_FILE", None),
-                patch.object(_scheduler_mod, "_pid_is_spark", return_value=False),
-                patch.dict(os.environ),
-            ):
-                os.environ.pop("SPARK_SKIP_PID_LOCK", None)
-                self.assertTrue(_acquire_pid_lock())
-            self.assertEqual(lock.read_text(encoding="utf-8"), str(os.getpid()))
-
     def test_exempt_child_proceeds_despite_parent_lock(self):
         """P0-1 回归: 豁免子进程照常获锁(才能产出正向证据), 且不破坏父进程的锁。"""
         with tempfile.TemporaryDirectory() as tmpd:
@@ -1625,15 +1693,11 @@ class TestPidLockExemption(unittest.TestCase):
     def test_run_exits_4_when_lock_not_acquired(self):
         """获锁失败必须非 0 退出: rc=4 让 cron 与自愈都能区分"跳过"和"成功"。"""
         with (
-            patch.object(_scheduler_mod, "_acquire_pid_lock", return_value=False),
+            patch.object(_lock_mod, "acquire", return_value=False),
             patch.object(
                 _scheduler_mod,
                 "load_config",
-                return_value={
-                    "accounts": [{"name": "a"}],
-                    "headless": False,
-                    "display": ":99",
-                },
+                return_value={"accounts": [{"name": "a"}]},
             ),
             patch.object(_scheduler_mod, "in_window", return_value=True),
             patch.object(sys, "argv", ["spark.py", "--dry-run", "--no-jitter"]),
@@ -1641,35 +1705,6 @@ class TestPidLockExemption(unittest.TestCase):
         ):
             run()
         self.assertEqual(ctx.exception.code, 4)
-
-    def test_run_exits_5_when_accounts_empty(self):
-        """2026-11-02 事故: 空 accounts 曾经只 log 一句就 return(rc=0), 整晚发 0 个
-        好友而 health_check 判健康。现在必须硬失败 rc=5, run_cron.sh 对它不重试。"""
-        with (
-            patch.object(
-                _scheduler_mod, "load_config", return_value={"accounts": []}
-            ),
-            patch.object(_scheduler_mod, "in_window", return_value=True),
-            patch.object(sys, "argv", ["spark.py", "--dry-run", "--no-jitter"]),
-            self.assertRaises(SystemExit) as ctx,
-        ):
-            run()
-        self.assertEqual(ctx.exception.code, 5)
-
-    def test_run_exits_5_when_account_missing_name(self):
-        """条目缺 name 也拦: 那种账号会被写进 state_None.json, 每晚静默错位。"""
-        with (
-            patch.object(
-                _scheduler_mod,
-                "load_config",
-                return_value={"accounts": [{"storage_file": "s.json"}]},
-            ),
-            patch.object(_scheduler_mod, "in_window", return_value=True),
-            patch.object(sys, "argv", ["spark.py", "--dry-run", "--no-jitter"]),
-            self.assertRaises(SystemExit) as ctx,
-        ):
-            run()
-        self.assertEqual(ctx.exception.code, 5)
 
 
 class TestHeartbeat(unittest.TestCase):

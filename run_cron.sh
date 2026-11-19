@@ -20,10 +20,6 @@ export SPARK_PERF_PROFILE=low
 #   2 = 未登录 → 直接退出, 不重试
 #   4 = 未获得 PID 锁(另一实例持锁) → 本次跳过, 不重试; **不当成功**(2026-10-01 评审:
 #       原先裸 return 得 rc=0, 若锁被挂死实例长期持有, cron 视角天天"成功"、静默断火)
-#   5 = 配置不可用(accounts 为空 / 条目没有 name) → 直接退出, 不重试
-#       2026-11-02 事故: config.json 被覆盖成 19 字节的桩, 空 accounts 让整晚跑 0 个
-#       好友却返回 rc=0, health_check 恒判健康、告警通道同时消失。现在由
-#       src/config.py 的 preflight() 抛 ConfigError → scheduler 退出 5。
 # 124 = timeout 包裹杀掉的挂死进程(同 rc=4 思路: 显式可见, 不静默)
 # 130(Ctrl+C)人工中断, 不重跑
 #
@@ -79,12 +75,6 @@ for attempt in 1 2 3; do
         echo "$(date '+%F %T') [run_cron] 未获得 PID 锁(另一实例持锁), 本次跳过(rc=4)" >> runtime/spark.log
         echo "$(date '+%F %T') [run_cron][warn] rc=4: 若连续多天出现, 说明有实例挂死未释放锁, 检查 runtime/.spark.pid" >> runtime/spark.log
         exit 4
-    fi
-    if [ "$rc" -eq 5 ]; then
-        # 配置不可用不是偶发故障: 重试三次也是同样结果, 只会把配置问题拖到凌晨。
-        echo "$(date '+%F %T') [run_cron] 配置不可用(accounts 为空或条目缺 name), 直接退出(rc=5)" >> runtime/spark.log
-        echo "$(date '+%F %T') [run_cron][warn] rc=5: 检查 config.json 的 accounts, 必要时从 config.json.bak-* 恢复" >> runtime/spark.log
-        exit 5
     fi
     if [ "$rc" -ne 1 ] && [ "$rc" -ne 3 ]; then
         echo "$(date '+%F %T') [run_cron] 运行失败(rc=${rc}), 非重试退出码, 直接退出" >> runtime/spark.log

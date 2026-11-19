@@ -9,25 +9,22 @@ import random
 import sys
 import time
 from datetime import datetime
-from pathlib import Path
 
 from playwright.sync_api import sync_playwright
 
 from logutil import _offline_entry, log
 
-from . import events, perf, recovery, streak_history
+from . import events, perf, recovery, runtime_lock, streak_history
 from .config import (
     CHAT_URL,
     DEFAULT_BROWSER_RECYCLE_MB,
     DEFAULT_BROWSER_REUSE,
     RUNTIME_DIR,
     SEND_STICKER,
-    ConfigError,
     get_account_storage_file,
     in_window,
     load_config,
     load_state,
-    preflight,
     write_state,
 )
 from .debug import dump_page
@@ -65,8 +62,6 @@ _HEALABLE_ERRORS = (TimeoutError, OSError, ConnectionError, BrokenPipeError)
 # 不像人。改为 0.5–1.2s; 需要回退用环境变量 SPARK_SEND_GAP="3,15"。
 _START_JITTER_MAX = 1800  # 每轮起始随机抖动上限(秒)
 
-_PID_FILE = None  # type: ignore[assignment]
-
 
 # 业务心跳(ChatGPT 外部评审 round-2 ④): 健康检查原先只认「进程还活着」, 但
 # 「活着但卡死」(如 Playwright 调用挂起而 timeout 未触发)会被豁免分支静音整晚。
@@ -82,7 +77,7 @@ def _heartbeat_filename() -> str:
 _HEARTBEAT_FILE = RUNTIME_DIR / _heartbeat_filename()
 
 
-# 心跳的"身份"字段(2026-11-01, 外部评审两轮之后): 只有 stage/账号/时间时,
+# 心跳的"身份"字段(2026-11-01 会话50, 外部评审两轮之后): 只有 stage/账号/时间时,
 # 上一轮留下的心跳与这一轮完全无法区分 —— 任何读者都会把旧心跳当成"新任务还活着"。
 # task_id 由 run() 启动时生成, 心跳与 events 模块共用同一个值; seq 在同一轮内递增,
 # 用来判断"心跳在新, 但一步没往前走"(卡死) 与 "心跳根本没更新"(没跑) 是两回事。
@@ -129,142 +124,24 @@ def _check_clock_sanity() -> None:
         log(f"[warn] 系统时钟异常({now:%Y-%m-%d %H:%M}), RTC 可能未同步")
 
 
-_PID_STALE_SEC = 3 * 3600  # PID 文件超过该年龄一律视为陈旧锁(兜住 PID 复用/无权限读取)
-
-
-def _pid_alive(pid: int) -> bool:
-    """该 PID 是否仍存活。
-
-    **不要在 Windows 上照抄 POSIX 的 `os.kill(pid, 0)`**: 那边 sig=0 就是
-    signal.CTRL_C_EVENT(值 0), 于是这次「探测」会把 Ctrl+C 广播进控制台进程组 ——
-    实测能把正在跑单测的控制台整段打断(subprocess.communicate 处抛
-    KeyboardInterrupt), 看起来像「跑测试卡死」。改用 OpenProcess 拿句柄判断。
-    """
-    if pid <= 0:
-        return False
-    if os.name == "nt":
-        import ctypes
-        from ctypes import wintypes
-
-        process_query_limited_information = 0x1000
-        still_active = 259
-        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-        # 必须显式声明签名: 不写 restype 时 ctypes 按 32 位 int 收回返回值, 而
-        # HANDLE 是指针宽度 —— 64 位下句柄被截断, 后续 GetExitCodeProcess /
-        # CloseHandle 拿到的是一个无效句柄。原来能跑只是运气(低位常不为 0),
-        # 而 CloseHandle 拿到截断值会静默失败, 句柄泄漏。
-        kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
-        kernel32.OpenProcess.restype = wintypes.HANDLE
-        kernel32.GetExitCodeProcess.argtypes = [
-            wintypes.HANDLE,
-            ctypes.POINTER(wintypes.DWORD),
-        ]
-        kernel32.GetExitCodeProcess.restype = wintypes.BOOL
-        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
-        kernel32.CloseHandle.restype = wintypes.BOOL
-        handle = kernel32.OpenProcess(
-            process_query_limited_information, False, pid
-        )
-        if not handle:
-            return False
-        try:
-            code = wintypes.DWORD()
-            ok = kernel32.GetExitCodeProcess(handle, ctypes.byref(code))
-            return bool(ok) and code.value == still_active
-        finally:
-            kernel32.CloseHandle(handle)
-    try:
-        os.kill(pid, 0)
-    except OSError:
-        return False
-    return True
-
-
-def _pid_is_spark(pid: int) -> bool:
-    """该 PID 是否确实是 spark.py 主任务(而非被复用的无关进程)。
-
-    /proc 是 Linux 专有: 其他平台(开发机)读不到 → 返回 False → 锁按陈旧接管。
-    无人值守生产只在板子上跑, 这里不为开发机另写一套进程枚举。
-    """
-    try:
-        cmdline = Path(f"/proc/{pid}/cmdline").read_bytes().decode("utf-8", "replace")
-    except OSError:
-        return False
-    return "spark.py" in cmdline
-
-
-def _acquire_pid_lock() -> bool:
-    """PID 文件互斥: 防止 cron 重叠导致双实例争抢 512MB 内存。返回 True = 获锁成功。
-
-    **豁免位 `SPARK_SKIP_PID_LOCK=1`**(持锁期间手工跑验证子进程专用): 主任务持锁期间想手工跑
-    `spark.py --dry-run/--verify-send` 时, 子进程若照常争锁, 会看见父 PID 存活 → 走
-    "另一实例运行中"分支 → 裸 return → **rc=0 且日志无「待发送≥1」** → `_log_evidence`
-    判定无证据(2026-10-01 评审发现)。置位后本进程不写 PID 文件, 因此也不会在退出时误删
-    父进程的锁。
-    """
-    global _PID_FILE
-    if os.environ.get("SPARK_SKIP_PID_LOCK", "").strip().lower() in (
-        "1",
-        "true",
-        "yes",
-    ):
-        log("[lock] SPARK_SKIP_PID_LOCK 已置位, 跳过 PID 互斥(不写 PID 文件)")
-        return True
-    _PID_FILE = os.path.join(
-        os.path.dirname(os.path.dirname(__file__)), "runtime", ".spark.pid"
-    )
-    try:
-        os.makedirs(os.path.dirname(_PID_FILE), exist_ok=True)
-        if os.path.isfile(_PID_FILE):
-            stale = False
-            try:
-                age = time.time() - os.path.getmtime(_PID_FILE)
-                if age > _PID_STALE_SEC:
-                    stale = True
-                    log(
-                        f"[warn] PID 文件已存在 {age / 3600:.1f}h"
-                        f"(超过 {_PID_STALE_SEC / 3600:.0f}h 上限), 视为陈旧锁并接管"
-                    )
-            except OSError:
-                pass
-            if not stale:
-                old_pid = None
-                try:
-                    old_pid = int(Path(_PID_FILE).read_text(encoding="utf-8").strip())
-                    if not _pid_alive(old_pid):
-                        old_pid = None
-                except (ValueError, OSError):
-                    old_pid = None
-                if old_pid is not None:
-                    if _pid_is_spark(old_pid):
-                        log(f"[warn] 另一实例运行中(PID {old_pid}), 退出")
-                        return False
-                    log(
-                        f"[warn] PID {old_pid} 存活但 cmdline 非 spark.py"
-                        "(疑似 PID 复用), 视为陈旧锁并接管"
-                    )
-        with open(_PID_FILE, "w", encoding="utf-8") as f:
-            f.write(str(os.getpid()))
-        return True
-    except OSError as exc:
-        log(f"[warn] PID 锁获取失败(继续执行): {exc}")
-        return True
-
-
-def _release_pid_lock() -> None:
-    if _PID_FILE:
-        try:
-            os.unlink(_PID_FILE)
-        except OSError:
-            pass
-
-
 def _fmt_duration(sec: float) -> str:
     """格式化耗时: <60s 显示秒, >=60s 显示分秒。"""
     if sec < 60:
         return f"{sec:.1f}s"
     m, s = divmod(sec, 60)
     return f"{int(m)}m{s:.1f}s"
+
+
+def _fmt_stages(marks: list) -> str:
+    """把 [(阶段名, 秒)] 渲染成日志尾巴: " (打开会话 12.1s / 表情 9.4s)"。
+
+    为什么要有(2026-11-19): 板端一夜的实测数据只到「每个好友总共 27s」这一层,
+    27s 里究竟是渲染、是表情面板、还是发送确认, 日志里看不出来 —— 于是任何优化
+    都只能靠猜。这里把阶段拆开, 下一夜的数字就能直接指出该动哪一段。
+    """
+    if not marks:
+        return ""
+    return " (" + " / ".join(f"{name} {sec:.1f}s" for name, sec in marks) + ")"
 
 
 def _heal_after_send_failure(
@@ -325,6 +202,21 @@ def _discard_shared_browser(browser, context) -> None:
     """复用模式丢弃故障共享浏览器: 先关 context 再关 browser, 避免 Target closed 噪音。"""
     close_session(None, context)
     close_session(browser, None)
+
+
+def _close_handoff(session) -> None:
+    """关掉发现阶段交下来的会话(没有就什么都不做)。
+
+    只在**不走发送阶段**的提前返回路径上调用(无待续/窗口外/覆盖门禁/verify-send):
+    正常情况下这个会话会被发送阶段的第一个好友接过去, 由那边按复用规则关闭。
+    """
+    if not session:
+        return
+    try:
+        browser, context, _page = session
+    except Exception:
+        return
+    close_session(browser, context)
 
 
 def _recycle_if_low_memory(shared_browser, threshold_mb: float):
@@ -395,17 +287,125 @@ def _page_usable(page) -> bool:
 _IDENTITY_STRICT = False
 
 
-def _log_friend_done(name: str, t0: float) -> None:
-    """每个出口都打一行耗时, 否则 [timing] 只剩成功路径, 失败的耗时看不见。"""
-    log(f"[timing] process_friend({name}) 耗时 {_fmt_duration(time.monotonic() - t0)}")
+def _await_chat_panel(page, name: str) -> bool:
+    """等会话面板(消息输入框)挂载; 两次都等不到返回 False。
 
+    2026-10-06 好友A事故: 点击列表项同秒即返回, 面板可能尚未挂载, 直接发送会把
+    顶部搜索框 input[type=text] 当输入框, 字打进搜索框变成假发送。取证 v1-v6
+    (板子实测): 重燃会话对一切可信点击 90s 不挂载, 唯有会话行上的合成事件序列能
+    打开 -> 首等超时后用 synthetic_click_row 抢救一次, 仍不挂载则快速失败
+    (不盲发: 无面板必败, 盲发只会烧重试预算并留下假发送风险)。
 
-def _open_friend_chat(page, name: str, dry_run: bool, t0: float):
-    """打开聊天页 → 确认登录 → 等列表 → 定位好友。
-
-    返回 None 表示可以继续发送; 否则返回的就是 process_friend 的结果
-    ("logged_out"/"fail"/dry-run 的 "ok")。
+    首段时长见 _panel_wait_ms()(默认 2.5s, SPARK_PANEL_WAIT_MS 可调): 板端实测
+    可信点击有时根本不打开面板, 而合成点击 1s 内就能打开, 白等 12.5s/好友不划算。
     """
+    try:
+        page.wait_for_selector(
+            '[contenteditable="true"]', state="visible", timeout=_panel_wait_ms()
+        )
+    except Exception:
+        hit = synthetic_click_row(page, name)
+        if hit:
+            log(
+                f"[核对] 可信点击未打开面板, 已向会话行合成点击 {hit}, "
+                f"再等 {perf.ms('contenteditable_ms') / 1000:.1f}s"
+            )
+        else:
+            log("[核对] 可信点击未打开面板, 且会话行合成点击定位失败")
+        try:
+            page.wait_for_selector(
+                '[contenteditable="true"]',
+                state="visible",
+                timeout=perf.ms("contenteditable_ms"),
+            )
+        except Exception:
+            log(
+                f"[失败] 『{name}』会话面板两次等待"
+                f"({_panel_wait_ms() / 1000:.1f}s+{perf.ms('contenteditable_ms') / 1000:.1f}s)"
+                f"均未挂载, 快速失败不盲发"
+            )
+            return False
+    return True
+
+
+def _verify_friend_identity(
+    page, name: str, account: str, attempt: str, *, strict: bool = False
+) -> bool:
+    """发送前核对右栏是不是这个人; 未通过时向会话行合成点击抢救一次再复检。
+
+    骨架期(读不到)先复检再裁决, 见 sender.verify_chat_opened_ready。
+    性能(2026-11-01): 复用页面时上一个好友的面板可能还挂在右栏, 此时可信点击没
+    生效 -> 核对看到的是"上一个好友" -> 判冲突。板端探针实测合成点击能可靠切换
+    会话, 故冲突时抢救一次(最多一次, 不循环)。
+    """
+    ok_id, id_detail = verify_chat_opened_ready(page, name, strict=strict)
+    log(f"[核对] {id_detail}")
+    events.emit(
+        "identity",
+        "verify",
+        "ok" if ok_id else "failed",
+        friend=name,
+        account=account,
+        attempt=attempt,
+        verified=True if "confirmed" in id_detail else None,
+        error_class=None if ok_id else "identity_conflict",
+        extra={"detail": id_detail[:80]},
+    )
+    if not ok_id:
+        hit = synthetic_click_row(page, name)
+        if hit:
+            log(f"[重试] 身份核对未通过, 已向会话行合成点击 {hit}, 再复检一次")
+            try:
+                page.wait_for_selector(
+                    '[contenteditable="true"]',
+                    state="visible",
+                    timeout=perf.ms("contenteditable_retry_ms"),
+                )
+            except Exception:
+                log("[重试] 合成点击后仍无会话面板")
+            ok_id, id_detail = verify_chat_opened_ready(page, name, strict=strict)
+            log(f"[重试] 复检: {id_detail}")
+    return ok_id
+
+
+def process_friend(
+    page, account: dict, name: str, dry_run: bool, *, parent: str | None = None
+) -> tuple[str, bool]:
+    """处理单个好友; 返回 (状态, 是否已发送)。状态: ok / fail / logged_out"""
+    # 复用上一个好友的页面时, 身份核对「读不到」不许放行: 右栏可能还是上一位,
+    # 半渲染瞬间放行 = 把消息发给不确定的人。由 _send_phase 按本轮是否复用设置。
+    # (2026-11-19: 这行原先压在 docstring 上面, 于是本函数其实没有 docstring。)
+    strict_identity = _IDENTITY_STRICT
+    acc_name = account.get("name", "?") if isinstance(account, dict) else "?"
+    # a0 是本好友这一轮的根 attempt: 表情→文字→视觉→自愈重跑 全部挂在它下面
+    a0 = parent or events.attempt_id()
+    log(f"======== 处理好友: {name} (账号 {acc_name}) ========")
+    events.emit(
+        "task",
+        "friend_start",
+        "ok",
+        friend=name,
+        account=acc_name,
+        attempt=a0,
+    )
+    log(f"[debug] process_friend 开始: {name}")
+    _heartbeat(f"friend_start:{name}", acc_name, name)
+    _t0 = time.monotonic()
+    _marks: list = []
+    _prev = [_t0]
+
+    def _mark(stage: str) -> None:
+        """记一段阶段耗时(只用于日志, 任何异常都不许影响发送)。"""
+        now = time.monotonic()
+        _marks.append((stage, now - _prev[0]))
+        _prev[0] = now
+
+    def _timing() -> None:
+        log(
+            f"[timing] process_friend({name}) 耗时 "
+            f"{_fmt_duration(time.monotonic() - _t0)}{_fmt_stages(_marks)}"
+        )
+
     try:
         # 性能(2026-11-01): 旧实现每个好友都整页 goto 一次, 板端实测每次重载
         # + 恢复登录态 + 等列表 ≈ 30s, 9 个好友就是 4-5 分钟纯等待; 而会话列表
@@ -426,13 +426,14 @@ def _open_friend_chat(page, name: str, dry_run: bool, t0: float):
 
         if not is_logged_in(page, quick=True):
             log("[登录] 会话已失效, 终止后续好友")
-            _log_friend_done(name, t0)
+            _timing()
             return "logged_out", False
         list_ok = wait_chat_list(page)
+        _mark("打开页面")
     except Exception as exc:
         log(f"[错误] 打开聊天页失败: {exc}")
         dump_page(page)
-        _log_friend_done(name, t0)
+        _timing()
         return "fail", False
 
     if not list_ok:
@@ -458,18 +459,15 @@ def _open_friend_chat(page, name: str, dry_run: bool, t0: float):
             log(f"[重试] 重载失败: {exc}")
     if clicked is None:
         log(f"[失败] 未能定位到好友『{name}』, 跳过该好友")
-        _log_friend_done(name, t0)
+        _timing()
         return "fail", False
 
+    _mark("定位好友")
     if dry_run:
         log(f"[dry-run] 『{name}』定位链路 OK, 未真正发送 (如需发送请去掉 --dry-run)")
-        _log_friend_done(name, t0)
+        _timing()
         return "ok", False
-    return None
 
-
-def _await_chat_panel(page, name: str) -> bool:
-    """等会话面板(唯一的 contenteditable)挂载, 可信点击不挂就合成点击抢救一次。"""
     # 性能(2026-11-01): 首段等待 15s 太长。板端实测(下午探针)可信点击有时根本
     # 不打开面板, 而合成点击 1s 内就能打开 —— 白等 12.5s/好友。改为首段 2.5s
     # (SPARK_PANEL_WAIT_MS 可调), 未挂载立刻合成点击抢救, 第二段仍等 15s。
@@ -479,78 +477,17 @@ def _await_chat_panel(page, name: str) -> bool:
     # 取证 v1-v6(板子实测): 重燃会话对一切可信点击 90s 不挂载面板, 唯有会话行上的
     # 合成事件序列能打开 → 首等超时后用 synthetic_click_row 抢救一次, 仍不挂载则
     # 快速失败(不盲发: 无面板必败, 盲发只会烧重试预算并留下假发送风险)。
-    try:
-        page.wait_for_selector(
-            '[contenteditable="true"]', state="visible", timeout=_panel_wait_ms()
-        )
-        return True
-    except Exception:
-        hit = synthetic_click_row(page, name)
-        if hit:
-            log(
-                f"[核对] 可信点击未打开面板, 已向会话行合成点击 {hit}, "
-                f"再等 {perf.ms('contenteditable_ms') / 1000:.1f}s"
-            )
-        else:
-            log("[核对] 可信点击未打开面板, 且会话行合成点击定位失败")
-        try:
-            page.wait_for_selector(
-                '[contenteditable="true"]',
-                state="visible",
-                timeout=perf.ms("contenteditable_ms"),
-            )
-            return True
-        except Exception:
-            log(
-                f"[失败] 『{name}』会话面板两次等待"
-                f"({_panel_wait_ms() / 1000:.1f}s+{perf.ms('contenteditable_ms') / 1000:.1f}s)"
-                f"均未挂载, 快速失败不盲发"
-            )
-            return False
+    if not _await_chat_panel(page, name):
+        _timing()
+        return "fail", False
 
+    if not _verify_friend_identity(page, name, acc_name, a0, strict=strict_identity):
+        log(f"[失败] 『{name}』发送前身份核对未通过, 跳过(不盲发)")
+        _timing()
+        return "fail", False
 
-def _verify_friend_identity(
-    page, name: str, acc_name: str, a0: str, strict: bool
-) -> tuple[bool, str]:
-    """发送前核对右栏是不是这个人; 冲突时向会话行合成点击再复检一次。"""
-    # 身份核对: 骨架期(读不到)先复检再裁决, 见 sender.verify_chat_opened_ready。
-    ok_id, id_detail = verify_chat_opened_ready(page, name, strict=strict)
-    log(f"[核对] {id_detail}")
-    events.emit(
-        "identity",
-        "verify",
-        "ok" if ok_id else "failed",
-        friend=name,
-        account=acc_name,
-        attempt=a0,
-        verified=True if "confirmed" in id_detail else None,
-        error_class=None if ok_id else "identity_conflict",
-        extra={"detail": id_detail[:80]},
-    )
-    if ok_id:
-        return True, id_detail
-    # 性能(2026-11-01): 复用页面时, 上一个好友的会话面板可能还挂在右栏,
-    # 此时可信点击没生效 → 身份核对看到的是"上一个好友" → 判冲突。板端探针
-    # 实测合成点击能可靠切换会话, 故冲突时先抢救一次(最多一次, 不循环)。
-    hit = synthetic_click_row(page, name)
-    if not hit:
-        return False, id_detail
-    log(f"[重试] 身份核对未通过, 已向会话行合成点击 {hit}, 再复检一次")
-    try:
-        page.wait_for_selector(
-            '[contenteditable="true"]',
-            state="visible",
-            timeout=perf.ms("contenteditable_retry_ms"),
-        )
-    except Exception:
-        log("[重试] 合成点击后仍无会话面板")
-    ok_id, id_detail2 = verify_chat_opened_ready(page, name, strict=strict)
-    log(f"[重试] 复检: {id_detail2}")
-    return ok_id, id_detail2
-
-
-def _deliver(page, name: str, acc_name: str, a0: str, t0: float) -> tuple[str, bool]:
-    """固定发送「续火花」: 表情包 → 文字兜底 → 视觉兜底, 逐级降级。"""
+    _mark("打开会话")
+    # 固定发送"续火花": 优先表情包, 失败以文字兜底。
     log(f"[发送] 模式: 表情包 ({SEND_STICKER})")
     a_sticker = events.attempt_id()
     sent, method = send_sticker(
@@ -562,6 +499,7 @@ def _deliver(page, name: str, acc_name: str, a0: str, t0: float) -> tuple[str, b
         account=acc_name,
     )
     log(f"[发送] 生效策略: {method}")
+    _mark("表情")
     events.emit(
         "sticker",
         "send",
@@ -573,7 +511,7 @@ def _deliver(page, name: str, acc_name: str, a0: str, t0: float) -> tuple[str, b
         extra={"method": method[:60]},
     )
     if sent:
-        _log_friend_done(name, t0)
+        _timing()
         return "ok", True
     log(f"[失败] 『{name}』表情发送失败, 以文字兜底『{SEND_STICKER}』")
 
@@ -602,6 +540,7 @@ def _deliver(page, name: str, acc_name: str, a0: str, t0: float) -> tuple[str, b
         account=acc_name,
     )
     log(f"[确认] {detail}")
+    _mark("文字确认")
     # 与 confirm_send 共用 a_text: 先报 ok 又被否掉 = false_positive(谎报)
     events.emit(
         "text",
@@ -616,7 +555,7 @@ def _deliver(page, name: str, acc_name: str, a0: str, t0: float) -> tuple[str, b
     )
     log(f"[debug] confirm_send 返回 okc={okc}, detail={detail}")
     if sent and okc:
-        _log_friend_done(name, t0)
+        _timing()
         return "ok", True
     log(f"[失败] 『{name}』发送未确认成功")
     # Emergency Visual Fallback: 表情+文字各发送层全失败(=本来就要失败)时,
@@ -625,50 +564,14 @@ def _deliver(page, name: str, acc_name: str, a0: str, t0: float) -> tuple[str, b
     ok_cv, cv_detail = cv_send_fallback(
         page, SEND_STICKER, name, attempt=a_cv, parent=a_text, account=acc_name
     )
+    _mark("视觉兜底")
     if ok_cv:
         log(f"[发送] 视觉兜底救回: {cv_detail}")
-        _log_friend_done(name, t0)
+        _timing()
         return "ok", True
     log(f"[失败] 『{name}』视觉兜底也未成功: {cv_detail}")
-    _log_friend_done(name, t0)
+    _timing()
     return "fail", False
-
-
-def process_friend(
-    page, account: dict, name: str, dry_run: bool, *, parent: str | None = None
-) -> tuple[str, bool]:
-    """处理单个好友; 返回 (状态, 是否已发送)。状态: ok / fail / logged_out"""
-    # 复用上一个好友的页面时, 身份核对「读不到」不许放行: 右栏可能还是上一位,
-    # 半渲染瞬间放行 = 把消息发给不确定的人。由 _send_phase 按本轮是否复用设置。
-    strict_identity = _IDENTITY_STRICT
-    acc_name = account.get("name", "?") if isinstance(account, dict) else "?"
-    # a0 是本好友这一轮的根 attempt: 表情→文字→视觉→自愈重跑 全部挂在它下面
-    a0 = parent or events.attempt_id()
-    log(f"======== 处理好友: {name} (账号 {acc_name}) ========")
-    events.emit(
-        "task",
-        "friend_start",
-        "ok",
-        friend=name,
-        account=acc_name,
-        attempt=a0,
-    )
-    log(f"[debug] process_friend 开始: {name}")
-    _heartbeat(f"friend_start:{name}", acc_name, name)
-    t0 = time.monotonic()
-
-    stopped = _open_friend_chat(page, name, dry_run, t0)
-    if stopped is not None:
-        return stopped
-    if not _await_chat_panel(page, name):
-        _log_friend_done(name, t0)
-        return "fail", False
-    ok_id, _detail = _verify_friend_identity(page, name, acc_name, a0, strict_identity)
-    if not ok_id:
-        log(f"[失败] 『{name}』发送前身份核对未通过, 跳过(不盲发)")
-        _log_friend_done(name, t0)
-        return "fail", False
-    return _deliver(page, name, acc_name, a0, t0)
 
 
 def has_login_state(account: dict) -> bool:
@@ -699,7 +602,11 @@ def _discover_with_hang_retry(
     渲染挂死(body 全空)是瞬时环境问题: 重开会话重试 1-2 次, 不走恢复策略
     (2026-09-30 事故: 渲染挂死被误判为选择器失效, 白烧 35 分钟 API(旧 AI 链))。
 
-    返回 (pending, 退出码): 退出码 0 = 发现成功(pending 可为空);
+    返回 (pending, 退出码, 会话): 退出码 0 = 发现成功(pending 可为空);
+    会话 = (browser, context, page) 或 None。**成功时不再关掉浏览器**(2026-11-19):
+    板端一夜要付两次 chromium 冷启动 + 两次整页加载(发现一次、发送一次), 而发现
+    结束时的页面正好停在聊天页、会话列表已就绪 —— 交给发送阶段第一个好友直接用,
+    两笔开销一起省掉。失败/异常路径一律返回 None(会话已在本函数里关干净)。
     1 = 渲染挂死重开仍空白/一般异常; 2 = 未登录且无法自动登录(重试无益, 但不影响
     其他账号); 3 = 自愈后重试仍失败(需冷启动重跑)。
     KeyboardInterrupt 不在此捕获, 交由调用方统一处理(与原行为一致)。
@@ -712,7 +619,13 @@ def _discover_with_hang_retry(
     while True:
         try:
             browser, context, page = open_session(p2, cfg, account)
+            _t_list = time.monotonic()
             list_ok = wait_chat_list(page)
+            # 与 open_session 的三阶段计时拼起来, 才算得出「固定开销」的完整构成。
+            log(
+                f"[timing] 会话列表就绪 {time.monotonic() - _t_list:.1f}s "
+                f"({'已就绪' if list_ok else '超时但页面有内容'})"
+            )
             if not list_ok and page_render_state(page) == "blank":
                 raise RenderHangDetected("会话列表超时且页面 body 全空(渲染挂死)")
             if list_ok:
@@ -728,10 +641,14 @@ def _discover_with_hang_retry(
             sniff_report(page)
             if pending:
                 save_session_state(context, account, tag=" (发现阶段)")
+                memory_report("discovery-handoff")
+                log(f"[timing] 发现阶段耗时 {_fmt_duration(time.monotonic() - _t0)}")
+                # 页面交给发送阶段(见 docstring); 没有待续好友就没有下家, 当场关掉。
+                return pending, 0, (browser, context, page)
             close_session(browser, context)
             memory_report("discovery-closed")
             log(f"[timing] 发现阶段耗时 {_fmt_duration(time.monotonic() - _t0)}")
-            return pending, 0
+            return pending, 0, None
         except RenderHangDetected as exc:
             hang_retries += 1
             close_session(browser, context)
@@ -743,7 +660,7 @@ def _discover_with_hang_retry(
                     f"(瞬时环境问题, 不触发本地恢复): {exc}"
                 )
                 log(f"[timing] 发现阶段耗时 {_fmt_duration(time.monotonic() - _t0)}")
-                return [], 1
+                return [], 1, None
             log(
                 f"[warn] 检测到渲染挂死, 重开会话重试 {hang_retries}/{_HANG_RETRIES}: {exc}"
             )
@@ -751,20 +668,20 @@ def _discover_with_hang_retry(
             log(f"自愈后重试仍失败, 返回码 3 交由 cron 脚本冷启动重跑: {exc}")
             close_session(browser, context)
             log(f"[timing] 发现阶段耗时 {_fmt_duration(time.monotonic() - _t0)}")
-            return [], 3
+            return [], 3, None
         except LoginRequiredError as exc:
             # 登录态失效: 重试/自愈都救不回(需要人工登录), 但**绝不能带走其他账号**。
             close_session(browser, context)
             log(f"[登录] 本账号登录态失效, 跳过本账号: {exc}")
             log(f"[timing] 发现阶段耗时 {_fmt_duration(time.monotonic() - _t0)}")
-            return [], 2
+            return [], 2, None
         except Exception as exc:
             log(f"发现阶段异常: {exc}")
             if page is not None:
                 dump_page(page)
             close_session(browser, context)
             log(f"[timing] 发现阶段耗时 {_fmt_duration(time.monotonic() - _t0)}")
-            return [], 1
+            return [], 1, None
 
 
 def _coverage_gate(account_name: str, pending: list[str], state: dict) -> int:
@@ -852,7 +769,9 @@ def _verify_send_phase(p2, cfg, account, state: dict, pending: list[str]) -> int
     return 1
 
 
-def _send_phase(p2, cfg, account, state: dict, pending: list[str], dry_run: bool):
+def _send_phase(
+    p2, cfg, account, state: dict, pending: list[str], dry_run: bool, first_session=None
+):
     """发送阶段: 逐好友发送, 含瞬时故障重试/本地恢复/渲染挂死处理。
 
     返回 (ok_count, fail_count, failed_names, skipped_names, login_halted)。
@@ -861,6 +780,8 @@ def _send_phase(p2, cfg, account, state: dict, pending: list[str], dry_run: bool
     不进入补扫。抄自同类无人值守项目的 continue_on_failure: 一个救不回的好友
     不该继续吃掉后面好友的时间。
     `login_halted`: True = 会话登录态失效导致整段中断, 本账号今晚不可能再成功。
+    `first_session`: 发现阶段交下来的 (browser, context, page)。第一个好友直接用它,
+    省掉一次 chromium 冷启动 + 一次整页 goto/等列表; 页面不可用则原样重建(保守)。
     """
     shared_browser = None
     reuse = cfg.get("browser_reuse", DEFAULT_BROWSER_REUSE)
@@ -925,9 +846,23 @@ def _send_phase(p2, cfg, account, state: dict, pending: list[str], dry_run: bool
                             log(f"[perf] 关闭保留页失败(忽略): {exc}")
                         cached = None
                     _IDENTITY_STRICT = False
-                    fb, fctx, fpage = open_session(
-                        p2, cfg, account, browser=shared_browser
-                    )
+                    fb = fctx = fpage = None
+                    if first_session is not None:
+                        # 只用一次: 第一个好友接手(或判定不可用后丢弃), 之后一律走重建。
+                        _handoff, first_session = first_session, None
+                        if _page_usable(_handoff[2]):
+                            fb, fctx, fpage = _handoff
+                            log(
+                                "[perf] 沿用发现阶段的会话页面"
+                                "(省一次 chromium 冷启动 + 一次整页加载)"
+                            )
+                        else:
+                            log("[perf] 发现阶段交下来的页面不可用, 重建会话")
+                            close_session(None if reuse else _handoff[0], _handoff[1])
+                    if fpage is None:
+                        fb, fctx, fpage = open_session(
+                            p2, cfg, account, browser=shared_browser
+                        )
                     page_uses = 0
                 if reuse and shared_browser is None:
                     shared_browser = fb
@@ -1141,7 +1076,6 @@ def _retry_phase(p2, cfg, account, state: dict, failed_names: list[str]):
 
 
 def process_account(
-    p,
     account: dict,
     cfg: dict,
     now,
@@ -1164,13 +1098,14 @@ def process_account(
     with sync_playwright() as p2:
         # ---- 阶段1: 发现会话(含渲染挂死重开重试) ----
         try:
-            pending, rc = _discover_with_hang_retry(
+            pending, rc, session = _discover_with_hang_retry(
                 p2, cfg, account, state, today, force, dry_run
             )
         except KeyboardInterrupt:
             log("用户中断 (Ctrl+C)")
             sys.exit(130)
         if rc != 0:
+            _close_handoff(session)
             return rc
 
         if not pending:
@@ -1189,6 +1124,7 @@ def process_account(
                 account=name,
                 self_heal_fn=lambda et, em, extra="": self_heal(et, em, extra),
             )
+            _close_handoff(session)
             return 0
 
         if not force and not in_window(now, start, end):
@@ -1197,20 +1133,25 @@ def process_account(
             )
             for fname in pending:
                 log(f"  - {fname}")
+            _close_handoff(session)
             return 0
 
         # ---- P5: 发现覆盖对照 ----
         rc = _coverage_gate(name, pending, state)
         if rc != 0:
+            _close_handoff(session)
             return rc
 
         # ---- 发送链路门禁 (--verify-send) ----
         if verify_send:
+            _close_handoff(session)
             return _verify_send_phase(p2, cfg, account, state, pending)
 
         # ---- 阶段2: 发送会话 ----
+        # 发现阶段的页面直接交给发送阶段第一个好友(见 _discover_with_hang_retry):
+        # 省掉一次 chromium 冷启动 + 一次整页 goto/等列表, 板端实测这两笔 ≈ 30-50s/账号。
         ok_count, fail_count, failed_names, skipped_names, login_halted = _send_phase(
-            p2, cfg, account, state, pending, dry_run
+            p2, cfg, account, state, pending, dry_run, first_session=session
         )
 
         # ---- 阶段3: 失败补扫(仅本地策略判定"值得重试"的) ----
@@ -1291,15 +1232,6 @@ def run() -> None:
     args = parser.parse_args()
 
     cfg = load_config()
-    # 2026-11-02 事故后加的硬门禁: accounts 缺失/为空/条目没有 name 时**不许跑**。
-    # 以前这里只 log 一句就 return, rc=0 —— 那一晚实际发送 0 个好友, 而 health_check
-    # 判健康、告警也没发出来, 整条链上没有一个环节会出声。退出码 5 由 run_cron.sh
-    # 单独分支处理(不重试、不计成功), 见 AGENTS.md 的退出码契约。
-    try:
-        preflight(cfg)
-    except ConfigError as exc:
-        log(f"[ERROR] 配置不可用, 本轮拒绝运行: {exc}")
-        raise SystemExit(5) from exc
     # 2026-11-01: 启动即把档位打进日志。以前「这台机器在跑哪一档」只能翻 config.json
     # 猜, 而档位同时决定浏览器资源上限与全流程等待节奏, 出问题第一个要看的就是它。
     log(f"[perf] {perf.describe()}")
@@ -1323,12 +1255,10 @@ def run() -> None:
 
     accounts = cfg.get("accounts") or []
     if not accounts:
-        # preflight 已经拦过一遍; 走到这里说明有人在 load_config 之后动过 cfg,
-        # 仍然不许静默 rc=0(见 preflight 的 docstring)。
-        log("[ERROR] accounts 为空, 本轮拒绝运行")
-        sys.exit(5)
+        log("【config.json 中未配置 accounts, 无可处理的账号】")
+        return
 
-    if not _acquire_pid_lock():
+    if not runtime_lock.acquire():
         # 获锁失败必须给**非 0** 退出码: 裸 return 会让 cron 与自愈验证都看到 rc=0,
         # 于是"锁被挂死实例长期持有"这种真实故障在监控面完全静默(天天"成功")。
         # rc=4 = 本次跳过(已有实例持锁); run_cron.sh 对其单独分支, 不重试、不计成功。
@@ -1363,7 +1293,6 @@ def run() -> None:
                 or has_login_state(account)
             ):
                 rc = process_account(
-                    None,
                     account,
                     cfg,
                     now,
@@ -1389,12 +1318,7 @@ def run() -> None:
                     f"【账号 {account.get('name', idx)} 未配置 account/password 且无登录态, 跳过】"
                 )
         log(f"[timing] 本次运行总耗时 {_fmt_duration(time.monotonic() - _t0_run)}")
-        # 终态心跳(2026-11-02): 在此之前一夜跑完之后心跳停在 account_done 不动,
-        # tools/task_watchdog.py 会把「正常收尾」判成 STALE「心跳已 4213s 没更新」
-        # —— 那是正常结束, 却和真卡死长得一模一样。有了 all_done, 看门狗才能说
-        # 「跑完了」而不是「不动了」。
-        _heartbeat("all_done")
-        # 任务收尾事件(2026-11-01): 记下可用内存最低值——以前没人记,
+        # 任务收尾事件(2026-11-01 会话50): 记下可用内存最低值——以前没人记,
         # 周报只能写"内存未采集"。available_mb() 读不到时返回 None, 事件里如实留空。
         _mem = available_mb()
         events.emit(
@@ -1409,4 +1333,4 @@ def run() -> None:
         if worst_rc:
             sys.exit(worst_rc)
     finally:
-        _release_pid_lock()
+        runtime_lock.release()

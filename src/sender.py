@@ -35,23 +35,6 @@ SEND_BUTTON_SELECTORS = [
     "svg[data-e2e*='send']",
 ]
 
-# 表情按钮候选(2026-11-01 板端 DOM 实测): 表情键是
-# <svg class="messageMsgInputiconAction">, 既没有 title/aria-label, 也没有
-# data-e2e —— 只有混淆类名可用。按「先按选择器就地派发, 再按先前量到的坐标点」
-# 的顺序用它, 理由见 synthetic_click 的 docstring。
-EMOJI_BTN_SELECTORS: tuple[str, ...] = (
-    "svg[class*='iconAction']",
-    "[class*='iconAction']",
-)
-
-# 合成点击用的发送键候选: 只取 SEND_BUTTON_SELECTORS 里**类名类**的前两条。
-# 文案类(button:has-text('发送'))与 [class*='send'] 这类宽泛选择器不进这里 ——
-# 合成点击是「在元素中心派发事件」, 命中范围越宽越容易点到别的东西上。
-SEND_BTN_SYNTH_SELECTORS: tuple[str, ...] = (
-    "svg[class*='publishBtn']",
-    "[class*='e2e-send-msg-btn']",
-)
-
 _JS_FIND_SEND_BTN = """
 () => {
   const box = document.querySelector('[contenteditable="true"]')
@@ -217,8 +200,11 @@ def _inject_verified(page, text: str) -> tuple:
         last = result
         if result.get("reason") != "content_mismatch":
             return "failed", result, i + 1
-        log(f"[发送] 输入内容与目标不等价(第 {i + 1} 次注入): 期望 {want!r}, 实际 {result.get('got')!r}")
+        log(
+            f"[发送] 输入内容与目标不等价(第 {i + 1} 次注入): 期望 {want!r}, 实际 {result.get('got')!r}"
+        )
     return "mismatch", last, _INJECT_ATTEMPTS
+
 
 # 2026-10-07 审计修正: 原 _JS_LAST_MSG 只回「最后一条文本」, 于是 confirm_send 无法
 # 区分「刚发出去的那条」与「昨晚残留的同一条」(固定文案 续火花 天天相同, 必然残留)。
@@ -245,12 +231,6 @@ _JS_MSG_TAIL = """
     list = best ? best.el : null;
   }
   if (!list) return out;
-  // 2026-11-19 板端实测: 只认精确一级 messageMessageBoxmessageBox(真实 13 行)。
-  // 旧版 [class*="messageMessageBox"], [class*="MessageBox"], [class*="bubble"] 把
-  // contentBox/columnBox/rowBox/Bottomwrapper 各算一行 —— 13 行数成 112 个, 再乘上
-  // 容器成 120。数量一虚, _evidence() 里「新增气泡」这条唯一的硬证据就失效了。
-  const STRICT = '[class*="messageMessageBoxmessageBox"]';
-  const KEYED = '[data-index]';
   const textOf = (n) => {
     const parts = [];
     for (const el of n.querySelectorAll('img[alt], img[title]')) {
@@ -264,23 +244,14 @@ _JS_MSG_TAIL = """
     if (raw && !parts.length) parts.push(raw);
     return parts.join(' ');
   };
-  let boxes = [...list.querySelectorAll(STRICT)];
-  if (!boxes.length) {
-    boxes = [...list.querySelectorAll(KEYED)]
-      .filter(e => e.querySelector('[data-e2e="msg-item-content"]'));
-  }
+  let boxes = [...list.querySelectorAll(
+    '[class*="messageMessageBoxmessageBox"], [class*="messageMessageBox"], [class*="MessageBox"], [class*="bubble"]')];
   if (!boxes.length) {
     boxes = [...list.children].filter(e => (e.innerText || '').trim() || e.querySelector('img[alt], img[title]'));
   }
-  // 只保留真正有尺寸的行(虚拟滚动会留下 height=0 的占位行)
-  boxes = boxes.filter(b => b.getBoundingClientRect().height > 1);
   out.n = boxes.length;
-  // 2026-11-19 板端实测: 列表 top 随 DOM 索引**递减** —— 索引 0 才是最新一条。
-  // 旧版取末元素拿到的是最早那条(通常是时间分隔/空行), 所以
-  // last 恒为 '', 文本级证据从来没生效过。这一条和上面的 STRICT 是一组: 数量取准、
-  // 尾部取对, 「新增气泡」才真的是硬证据。
-  if (boxes.length) out.last = textOf(boxes[0]);
-  if (boxes.length > 1) out.prev = textOf(boxes[1]);
+  if (boxes.length) out.last = textOf(boxes[boxes.length - 1]);
+  if (boxes.length > 1) out.prev = textOf(boxes[boxes.length - 2]);
   return out;
 }
 """
@@ -308,21 +279,13 @@ _JS_LAST_BUBBLE_SELF = """
   let list = document.querySelector(
     '[class*="messageMessageListlist"], [class*="messageMessageList"], [class*="MessageList"], [data-e2e*="message-list"]');
   if (!list) return null;
-  // 与 _JS_MSG_TAIL 同一套选择器与同一套索引口径, 否则两处读到的「最后一条」
-  // 不是同一条, 旁证会和主证据互相矛盾。
-  const STRICT = '[class*="messageMessageBoxmessageBox"]';
-  const KEYED = '[data-index]';
-  let boxes = [...list.querySelectorAll(STRICT)];
-  if (!boxes.length) {
-    boxes = [...list.querySelectorAll(KEYED)]
-      .filter(e => e.querySelector('[data-e2e="msg-item-content"]'));
-  }
+  let boxes = [...list.querySelectorAll(
+    '[class*="messageMessageBoxmessageBox"], [class*="messageMessageBox"], [class*="MessageBox"], [class*="bubble"]')];
   if (!boxes.length) {
     boxes = [...list.children].filter(e => (e.innerText || '').trim() || e.querySelector('img[alt], img[title]'));
   }
-  boxes = boxes.filter(b => b.getBoundingClientRect().height > 1);
   if (!boxes.length) return null;
-  const box = boxes[0];  // 索引 0 = 最新一条(同 _JS_MSG_TAIL 的板端实测)
+  const box = boxes[boxes.length - 1];
   const br = box.getBoundingClientRect();
   const lr = list.getBoundingClientRect();
   if (!br.width || !lr.width) return null;
@@ -334,7 +297,7 @@ _JS_LAST_BUBBLE_SELF = """
 def last_bubble_is_self(page: Page):
     """最后一条可见消息是否我方发出; 读不到返回 None。
 
-    2026-11-01: 续火花是**双方互发同一个表情**, 而表情层的成功判据是
+    2026-11-01 会话50: 续火花是**双方互发同一个表情**, 而表情层的成功判据是
     「最后一条文本里含表情名」——好友回一个同样的表情也会命中。此函数只提供
     旁证并写入事件, **不参与判定**(改判定会改变今晚的发送行为)。
     """
@@ -497,42 +460,10 @@ def try_send_button_or_enter(
 ) -> str:
     """触发发送; 返回做了什么的描述(调用方写进日志, 不再谎报「已发送」)。
 
-    顺序: JS 合成点击 → 几何定位(命中校验) → 具名选择器 → Enter 兜底。
-    Enter 只作为最后手段, 因为它在本项目历史上多次「按了但没发出」。
-
-    合成点击排第一是因为 2026-11-02 板端实测: Playwright 的 mouse/keyboard 在
-    无窗口管理器的 Xvfb 上全部无效(点发送键连网络请求都没有), 只有 JS 合成的
-    指针序列能触发 React。桌面档上两种都能用, 合成点击并不会更差 —— 它同样要
-    过「输入框是否清空」这一关, 没清空就继续往下走, 不谎报已发送。
+    顺序: 几何定位(命中校验) → 具名选择器 → Enter 兜底。Enter 只作为最后手段,
+    因为它在本项目历史上多次「按了但没发出」。
     """
     aid = attempt or events.attempt_id()
-    # 0) JS 合成点击: 板端唯一真正生效的路径(见 synthetic_click_at 的 docstring)。
-    #    每个候选点完都得过「输入框是否清空」这一关, 没清空就换下一个, 与后面
-    #    几何/选择器两条路同一把尺子 —— 派发成功不等于发出去了。
-    for sel in SEND_BTN_SYNTH_SELECTORS:
-        got = synthetic_click(page, sel)
-        if not got:
-            continue
-        page.wait_for_timeout(perf.ms("send_confirm_ms"))
-        try:
-            emptied = bool(page.evaluate(_JS_BOX_EMPTY))
-        except Exception:
-            emptied = False
-        if not emptied:
-            log(f"[发送] 合成点击 {sel} 后输入框未清空, 试下一个候选")
-            continue
-        log(f"[发送] 已点击发送按钮(合成事件: {got['x']},{got['y']})")
-        events.emit(
-            "send_button",
-            "click",
-            "ok",
-            friend=friend,
-            attempt=aid,
-            verified=None,
-            extra={"via": "synthetic", "sel": sel[:40], "x": got["x"], "y": got["y"]},
-        )
-        return f"已点击发送按钮(合成 {got['x']},{got['y']})"
-
     hit = _click_geometry_send_button(page)
     if hit:
         log(f"[发送] 已点击发送按钮(几何命中: {hit})")
@@ -642,8 +573,13 @@ def send_message(
         attempt=aid,
         verified=None,
         error_class=(
-            None if state == "ok"
-            else ("content_mismatch" if state == "mismatch" else str(result.get("reason") or state))
+            None
+            if state == "ok"
+            else (
+                "content_mismatch"
+                if state == "mismatch"
+                else str(result.get("reason") or state)
+            )
         ),
         extra={
             "btn_clicked": bool(result.get("btnClicked")),
@@ -703,7 +639,9 @@ def send_message(
             if normalize_box_text(got) == want:
                 act = try_send_button_or_enter(page, attempt=aid, friend=friend)
                 return True, f"策略B 生效: click + keyboard.type + {act}"
-            log(f"[发送] 策略B 输入不等价(第 {i + 1} 次): 期望 {want!r}, 实际 {got[:40]!r}, 清空重打")
+            log(
+                f"[发送] 策略B 输入不等价(第 {i + 1} 次): 期望 {want!r}, 实际 {got[:40]!r}, 清空重打"
+            )
         try:
             page.evaluate(_JS_CLEAR_BOX)
         except Exception:
@@ -767,7 +705,6 @@ def _evidence(base: tuple, n1, last1: str, prev1: str) -> tuple:
     if (last1, prev1) != (last0, prev0):
         return True, f"尾部窗口移动 {last0[:16]!r}->{last1[:16]!r} (数量 {n1})"
     return False, f"无任何新增(数量仍 {n0}, 尾部仍 {last1[:24]!r})"
-
 
 
 def confirm_send(
@@ -1151,148 +1088,6 @@ def verify_chat_opened_ready(
     return True, f"{detail}, 无法判定, 放行{extra}"
 
 
-_JS_SYNTH_CLICK_AT = """([x, y]) => {
-    const el = document.elementFromPoint(x, y);
-    if (!el) return false;
-    const mk = (type, Ctor) => new Ctor(type, {
-        bubbles: true, cancelable: true, composed: true,
-        clientX: x, clientY: y, button: 0, buttons: 1, view: window});
-    for (const [type, Ctor] of [
-        ['pointerover', PointerEvent], ['pointerdown', PointerEvent],
-        ['mousedown', MouseEvent], ['pointerup', PointerEvent],
-        ['mouseup', MouseEvent], ['click', MouseEvent],
-    ]) {
-        el.dispatchEvent(mk(type, Ctor));
-    }
-    return true;
-}"""
-
-
-_JS_SYNTH_CLICK_SEL = """(sel) => {
-    const el = document.querySelector(sel);
-    if (!el) return null;
-    const r = el.getBoundingClientRect();
-    if (r.width <= 0 || r.height <= 0) return null;
-    const x = r.x + r.width / 2, y = r.y + r.height / 2;
-    const mk = (type, Ctor) => new Ctor(type, {
-        bubbles: true, cancelable: true, composed: true,
-        clientX: x, clientY: y, button: 0, buttons: 1, view: window});
-    for (const [type, Ctor] of [
-        ['pointerover', PointerEvent], ['pointerdown', PointerEvent],
-        ['mousedown', MouseEvent], ['pointerup', PointerEvent],
-        ['mouseup', MouseEvent], ['click', MouseEvent],
-    ]) {
-        el.dispatchEvent(mk(type, Ctor));
-    }
-    return {x: Math.round(x), y: Math.round(y)};
-}"""
-
-
-_JS_CLICK_STICKER = """(name) => {
-    // 「找到就点」一次做完: 2026-11-02 审计发现, 先 JS_FIND_STICKER 量坐标、
-    // 再由 Python 派发点击, 中间面板还在做入场动画(或滚动吸附) —— 量到的
-    // 矩形和真正点击那一刻差几十像素, 于是点空: 面板关了、一条新消息都没有。
-    // 板端 6 次「表情面板已关闭但无任何新增」全是这一类。
-    const panel = document.querySelector(
-        '[class*="emojiPanel"], [class*="stickerPanel"], [data-e2e*="emoji"]');
-    let items = [];
-    if (panel) {
-        items = panel.querySelectorAll('[class*="emojiItem"]:not([class*="Desc"])');
-    }
-    if (!items.length) {
-        items = document.querySelectorAll(
-            '[class*="emojiItem"]:not([class*="Desc"]), [class*="stickerItem"]');
-    }
-    let occluded = null;
-    for (const item of items) {
-        if (!(item.innerText || '').trim().includes(name)) continue;
-        let r = item.getBoundingClientRect();
-        if (!(r.width > 0 && r.height > 0)) continue;
-        try { item.scrollIntoView({block: 'nearest', inline: 'nearest'}); } catch (e) {}
-        r = item.getBoundingClientRect();
-        const x = Math.round(r.x + r.width / 2);
-        const y = Math.round(r.y + r.height / 2);
-        if (x <= 0 || y <= 0 || x >= window.innerWidth || y >= window.innerHeight) continue;
-        const hit = document.elementFromPoint(x, y);
-        if (!hit) continue;
-        if (hit !== item && !item.contains(hit) && !hit.contains(item)) {
-            if (!occluded) occluded = {x: x, y: y, tag: hit.tagName,
-                cls: (hit.className || '').toString().slice(0, 40)};
-            continue;
-        }
-        // 就地派发(与 synthetic_click_at 同一套六连), 不用 Python 再算一遍坐标。
-        const opts = {bubbles: true, cancelable: true, composed: true,
-                      clientX: x, clientY: y, button: 0, buttons: 1, view: window};
-        const target = hit;
-        for (const type of ['pointerover', 'pointerdown', 'mousedown',
-                            'pointerup', 'mouseup', 'click']) {
-            const Ctor = type.startsWith('pointer') ? PointerEvent : MouseEvent;
-            target.dispatchEvent(new Ctor(type, opts));
-        }
-        return {ok: true, x: x, y: y, tag: target.tagName};
-    }
-    if (occluded) return {ok: false, error: 'sticker_occluded', at: occluded};
-    return {ok: false, error: 'sticker_not_found'};
-}"""
-
-
-def synthetic_click_at(page: Page, x: float, y: float) -> bool:
-    """在 (x, y) 处向 elementFromPoint 命中元素派发合成指针/鼠标事件序列。
-
-    2026-11-02 板端实测(Xvfb :99, 无窗口管理器): Playwright 的
-    page.mouse.click / locator.click / keyboard.type / keyboard.press 在这台
-    机器上**全部无效** —— 点发送键无任何网络请求、输入框不清空、点表情键面板
-    不弹、Enter 也发不出去。唯独 JS 里合成的
-    pointerover→pointerdown→mousedown→pointerup→mouseup→click 序列能真正触发
-    React 处理器: 发送键一次成功(POST imapi.douyin.com/v1/message/send, 输入框
-    清空), 表情键一次就把面板打开。
-
-    这就是「表情主路径整月全挂 + 文字层靠视觉兜底」的底层原因。桌面档上
-    可信点击本来就正常, 合成事件只是等价的一条路, 故不做档位区分 —— 但所有
-    调用方都必须用「输入框是否清空 / 面板是否打开」复核, 不能把「派发成功」
-    当成「操作成功」。
-    """
-    try:
-        return bool(page.evaluate(_JS_SYNTH_CLICK_AT, [x, y]))
-    except Exception as exc:
-        log(f"[合成点击] ({x},{y}) 派发失败: {exc}")
-        return False
-
-
-def _click_coords(got):
-    """把 JS 的合成点击返回值收敛成 {x, y} 或 None。
-
-    元素不存在时 JS 返回 null; 但 evaluate 也可能返回别的东西(旧版本脚本、被 mock、
-    扩展注入)。只要拿到的不是带数值 x/y 的 dict 就当没点到 —— 否则调用方拿到的
-    「坐标」会在日志里打出一串看不懂的东西, 而分支以为自己点过了。
-    """
-    if not isinstance(got, dict):
-        return None
-    x, y = got.get("x"), got.get("y")
-    if isinstance(x, bool) or isinstance(y, bool):
-        return None
-    if not isinstance(x, (int, float)) or not isinstance(y, (int, float)):
-        return None
-    return {"x": x, "y": y}
-
-
-def synthetic_click(page: Page, selector: str):
-    """按选择器取第一个元素, 向它的中心派发合成点击; 返回坐标 dict 或 None。
-
-    优先于「先量坐标再点」: 量完到点下去之间页面会重排(输入栏变高、草稿换行),
-    按钮挪十几像素就点空了。板端 14 天里 18 次「表情面板未打开」全是这类。
-    """
-    try:
-        got = page.evaluate(_JS_SYNTH_CLICK_SEL, selector)
-    except Exception as exc:
-        log(f"[合成点击] {selector} 派发失败: {exc}")
-        return None
-    hit = _click_coords(got)
-    if hit is None and got is not None:
-        log(f"[合成点击] {selector} 返回值无法解析({type(got).__name__}), 当作未命中")
-    return hit
-
-
 _JS_SYNTH_ROW_CLICK = """(name) => {
     let t = null;
     for (const el of document.querySelectorAll('span,div')) {
@@ -1332,8 +1127,11 @@ def synthetic_click_row(page: Page, name: str):
         return None
 
 
+# 表情层一次尝试的溯源四元组: 12 个事件出口都要带同一组字段, 打包免得逐个抄。
+# parent 是账号级根 attempt(调度器传下来的 a0), 它把整晚的尝试串成一棵树。
+_StickerTrace = namedtuple("_StickerTrace", "friend account attempt parent")
 
-# 表情层: 四个 JS 探针提到模块级, 与下面 _JS_EDITABLE_RECT/_JS_SET_BOX_TEXT 一致。
+
 _JS_FIND_EMOJI_BTN = """() => {
     const editable = document.querySelector('[contenteditable="true"]');
     if (!editable) return null;
@@ -1443,61 +1241,44 @@ _JS_PANEL_CLOSED = """() => {
     return true;
 }"""
 
-# 表情层事件的四个公共字段: 同一次 attempt 串成链路, parent 指向失败的上游层。
-_StickerTrace = namedtuple("_StickerTrace", "friend account attempt parent")
 
-
-def _emit_sticker(trace, action: str, result: str, **extra) -> None:
-    """表情层的结构化事件: 各出口共用同一组 friend/account/attempt/parent。"""
+def _emit_sticker(trace: _StickerTrace, step: str, result: str, **fields) -> None:
+    """表情层的一个结构化事件出口: 溯源四件套固定, 只由调用方决定判据字段。"""
     events.emit(
         "sticker",
-        action,
+        step,
         result,
         friend=trace.friend,
         account=trace.account,
         attempt=trace.attempt,
         parent=trace.parent,
-        **extra,
+        **fields,
     )
 
 
-def _open_sticker_panel(page: Page, trace) -> tuple:
-    """找表情按钮并展开面板, 等到内容加载完。返回 (是否打开, 失败原因)。"""
+def _open_sticker_panel(page: Page, trace: _StickerTrace) -> str:
+    """点开表情面板并等内容就绪; 返回空串表示可用, 否则是给调用方的失败说明。"""
     btn = page.evaluate(_JS_FIND_EMOJI_BTN)
     if not btn:
         _emit_sticker(trace, "find_button", "failed", error_class="no_emoji_btn")
-        return False, "未找到表情按钮"
+        return "未找到表情按钮"
     log(f"[表情] 表情按钮: ({btn['x']},{btn['y']})")
     _emit_sticker(trace, "find_button", "ok", extra={"x": btn["x"], "y": btn["y"]})
-
-    # 2026-11-02: 实测 page.mouse.click 在本机(无窗口管理器的 Xvfb)完全无效,
-    # 表情面板根本弹不出来, 必须走 JS 合成事件。而且优先「按选择器就地派发」
-    # 而不是「按先前量到的坐标点」: 板端 14 天里有 18 次「表情面板未打开」,
-    # 都是量完坐标到真正点下去之间输入栏重排了(草稿变高/多行), 按钮挪了十几
-    # 像素, 点在空白上。面板是否真打开由下面的 _JS_PANEL_VISIBLE 复核。
-    opened_by_sel = False
-    for sel in EMOJI_BTN_SELECTORS:
-        if synthetic_click(page, sel):
-            opened_by_sel = True
-            break
-    if not opened_by_sel:
-        synthetic_click_at(page, btn["x"], btn["y"])
+    page.mouse.click(btn["x"], btn["y"])
 
     # 面板打开等待: 循环内一检测到即 break, 故加大上限只影响「本会失败」的场景,
     # 对正常好友(<3s 打开)零延迟。2026-10-06 好友A实测: 经 synthetic_click_row
     # 抢救刚挂载的面板, 其工具栏初始化更慢, 表情面板在点击后 >3s 才渲染出
     # (截图证实最终打开且 续火花 表情可见), 旧 6×500ms 窗口过早判失败退到文字兜底,
     # 而兜底又因面板此时刚弹出发起 Enter 被拦截 → 假发送。放宽到 12×500ms=6s。
-    opened = False
-    _rounds = max(1, perf.ms("panel_open_ms") // max(1, perf.ms("panel_poll_ms")))
-    for _ in range(_rounds):
+    rounds = max(1, perf.ms("panel_open_ms") // max(1, perf.ms("panel_poll_ms")))
+    for _ in range(rounds):
         page.wait_for_timeout(perf.ms("panel_poll_ms"))
         if page.evaluate(_JS_PANEL_VISIBLE):
-            opened = True
             break
-    if not opened:
+    else:
         _emit_sticker(trace, "open_panel", "failed", error_class="panel_not_open")
-        return False, "表情面板未打开"
+        return "表情面板未打开"
 
     try:
         page.wait_for_selector(
@@ -1509,13 +1290,13 @@ def _open_sticker_panel(page: Page, trace) -> tuple:
         _emit_sticker(
             trace, "load_panel", "failed", error_class="panel_content_timeout"
         )
-        return False, "表情面板内容未加载"
-    return True, ""
+        return "表情面板内容未加载"
+    return ""
 
 
-def _pick_sticker(page: Page, sticker_name: str, trace) -> tuple:
-    """在已展开的面板里找目标表情。返回 (坐标, 失败原因); 失败时坐标为 None。"""
-    target = page.evaluate(_JS_FIND_STICKER, sticker_name)
+def _pick_sticker(page: Page, name: str, trace: _StickerTrace) -> tuple:
+    """在已打开的面板里定位目标表情; 返回 (坐标, 失败说明), 二者必有其一。"""
+    target = page.evaluate(_JS_FIND_STICKER, name)
     if "error" in target:
         _emit_sticker(trace, "find_item", "failed", error_class=target.get("error"))
         if target.get("error") == "sticker_occluded":
@@ -1524,45 +1305,24 @@ def _pick_sticker(page: Page, sticker_name: str, trace) -> tuple:
                 f"表情项被遮挡, 点不到: ({at.get('x')},{at.get('y')}) 处是 "
                 f"{at.get('tag', '')}.{at.get('cls', '')}"
             )
-        return None, f"表情面板中未找到『{sticker_name}』"
+        return None, f"表情面板中未找到『{name}』"
     log(f"[表情] 目标表情: ({target['x']},{target['y']})")
-    _emit_sticker(
-        trace, "find_item", "ok", extra={"x": target["x"], "y": target["y"]}
-    )
+    _emit_sticker(trace, "find_item", "ok", extra={"x": target["x"], "y": target["y"]})
     return target, ""
 
 
-def _await_sticker_result(page: Page, sticker_name: str, target, trace) -> tuple:
-    """点下去再判结果: 点击本身不是证据, 只看会话尾部有没有新增。"""
-    # 基线必须在**点击表情之前**取: 文案固定为「续火花」, 昨晚那条表情还挂在列表
-    # 尾部, 只比文本会把残留读成本次发送。
-    base = read_tail(page)
-    # 「找到就点」一次做完: 先 _JS_FIND_STICKER 量坐标、再由 Python 派发点击,
-    # 中间面板还在做入场动画(或滚动吸附), 量到的矩形和真正点击那一刻差几十
-    # 像素就点空 —— 面板关了、一条新消息都没有(板端 6 次「表情面板已关闭但
-    # 无任何新增」全是这类)。_JS_CLICK_STICKER 内部就地派发, 失败才退回坐标。
-    clicked = page.evaluate(_JS_CLICK_STICKER, sticker_name)
-    if not (isinstance(clicked, dict) and clicked.get("ok")):
-        why = (clicked or {}).get("error") if isinstance(clicked, dict) else None
-        log(f"[表情] 元素内派发失败({why}), 退回坐标点击", level="WARN")
-        synthetic_click_at(page, target["x"], target["y"])
-    else:
-        log(f"[表情] 已在表情项上派发点击: ({clicked['x']},{clicked['y']})")
-    # 点击本身不是证据(没抛异常≠发出去了), verified 只能是 None
-    _emit_sticker(
-        trace,
-        "click_item",
-        "ok",
-        verified=None,
-        extra={"x": target["x"], "y": target["y"], "n0": base[0]},
-    )
+def _await_sticker_result(
+    page: Page, name: str, base: tuple, trace: _StickerTrace
+) -> tuple:
+    """点击表情后判定是否真的发出去了; 返回 (是否成功, 说明)。
 
-    # 点击表情后抖音自动发送并关闭面板。确认信号(2026-10-07 审计后重排):
-    # 1) 有「新增气泡/尾部窗口移动」的硬证据 -> 明确成功(最强)
-    # 2) 面板关闭但证据读不到(列表容器定位失败) -> 沿用旧口径判成功, 标注「降级」
-    #    让 strat_stats 能统计这一层的失证比例, 不把它当成验证过
-    # 3) 面板关闭但证据可读且**毫无新增** -> 判未发送(表情点了个空)
-    # 注意: 表情发送成功后不要再走文字兜底, 避免重复发送。
+    点击后续抖音会自动发送并关闭面板, 三档证据(2026-10-07 审计后重排):
+    1) 有「新增气泡/尾部窗口移动」的硬证据 -> 明确成功(最强)
+    2) 面板关闭但证据读不到(列表容器定位失败) -> 沿用旧口径判成功, 标注「降级」
+       让 strat_stats 能统计这一层的失证比例, 不把它当成验证过
+    3) 面板关闭但证据可读且**毫无新增** -> 判未发送(表情点了个空)
+    注意: 表情发送成功后不要再走文字兜底, 避免重复发送。
+    """
     closed_no_ev = None
     for i in range(6):
         # 性能(2026-11-01): 首拍 250ms(气泡通常立刻出现), 之后维持 500ms。
@@ -1572,7 +1332,7 @@ def _await_sticker_result(page: Page, sticker_name: str, target, trace) -> tuple
         n1, last, prev = read_tail(page)
         ev, ev_msg = _evidence(base, n1, last, prev)
         if ev is True:
-            if sticker_name in last or page.evaluate(_JS_PANEL_CLOSED):
+            if name in last or page.evaluate(_JS_PANEL_CLOSED):
                 _emit_sticker(
                     trace,
                     "verify",
@@ -1581,14 +1341,14 @@ def _await_sticker_result(page: Page, sticker_name: str, target, trace) -> tuple
                     extra={
                         "ev": ev_msg,
                         "bubble": n1,
-                        "text_match": sticker_name in last,
+                        "text_match": name in last,
                         "last_is_self": last_bubble_is_self(page),
                     },
                 )
-                return True, f"表情已发送: {sticker_name} ({ev_msg})"
+                return True, f"表情已发送: {name} ({ev_msg})"
             continue
         if ev is None:
-            if sticker_name in last:
+            if name in last:
                 _emit_sticker(
                     trace,
                     "verify",
@@ -1602,19 +1362,15 @@ def _await_sticker_result(page: Page, sticker_name: str, target, trace) -> tuple
                 )
                 return (
                     True,
-                    f"表情已发送(降级 {ev_msg}): {sticker_name} (最新消息匹配 {last[:30]!r})",
+                    f"表情已发送(降级 {ev_msg}): {name} (最新消息匹配 {last[:30]!r})",
                 )
             if page.evaluate(_JS_PANEL_CLOSED):
                 _emit_sticker(
-                    trace,
-                    "verify",
-                    "ok",
-                    verified=None,
-                    extra={"degraded": ev_msg},
+                    trace, "verify", "ok", verified=None, extra={"degraded": ev_msg}
                 )
                 return (
                     True,
-                    f"表情已发送(降级 {ev_msg}): {sticker_name} (面板已关闭, 抖音自动发送)",
+                    f"表情已发送(降级 {ev_msg}): {name} (面板已关闭, 抖音自动发送)",
                 )
             continue
         if page.evaluate(_JS_PANEL_CLOSED):
@@ -1628,10 +1384,7 @@ def _await_sticker_result(page: Page, sticker_name: str, target, trace) -> tuple
         return False, f"表情面板已关闭但{closed_no_ev}, 判未发送"
     # 面板没关、窗口用尽: 分不清「没发出」与「发出但面板没关」→ unknown 更诚实
     _emit_sticker(trace, "verify", "unknown", verified=None)
-    return (
-        False,
-        f"表情面板未关闭, 发送可能失败 (最新消息 {read_tail(page)[1][:30]!r})",
-    )
+    return False, f"表情面板未关闭, 发送可能失败 (最新消息 {read_tail(page)[1][:30]!r})"
 
 
 def send_sticker(
@@ -1645,21 +1398,32 @@ def send_sticker(
 ) -> tuple:
     """发送抖音内置表情包; 返回 (是否已尝试, 生效策略描述)。
 
-    流程: 找表情按钮并展开面板 → 等内容加载 → 找指定表情 → 点击(自动发送)
-    → 按会话尾部新增判定结果。三步各在本文件的私有函数里, 判据顺序不动。
+    流程: 找表情按钮 → 打开面板 → 等待内容加载 → 找指定表情 → 点击(自动发送)。
 
-    attempt/parent 用于结构化事件(2026-11-01): 同一好友的同一轮尝试共用
+    attempt/parent 用于结构化事件(2026-11-01 会话50): 同一好友的同一轮尝试共用
     一个 attempt id, 上一层失败的 id 作为下一层的 parent, 才能算出「独立救回」。
     """
     trace = _StickerTrace(friend, account, attempt or events.attempt_id(), parent)
     try:
-        opened, why = _open_sticker_panel(page, trace)
-        if not opened:
+        why = _open_sticker_panel(page, trace)
+        if why:
             return False, why
         target, why = _pick_sticker(page, sticker_name, trace)
-        if target is None:
+        if why:
             return False, why
-        return _await_sticker_result(page, sticker_name, target, trace)
+        # 基线必须在**点击表情之前**取: 文案固定为「续火花」, 昨晚那条表情还挂在列表
+        # 尾部, 只比文本会把残留读成本次发送。
+        base = read_tail(page)
+        page.mouse.click(target["x"], target["y"])
+        # 点击本身不是证据(没抛异常≠发出去了), verified 只能是 None
+        _emit_sticker(
+            trace,
+            "click_item",
+            "ok",
+            verified=None,
+            extra={"x": target["x"], "y": target["y"], "n0": base[0]},
+        )
+        return _await_sticker_result(page, sticker_name, base, trace)
     except Exception as exc:
         _emit_sticker(trace, "verify", "failed", error_class=type(exc).__name__)
         return False, f"表情发送异常: {exc}"

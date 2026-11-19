@@ -7,16 +7,18 @@
 | 字段 | 默认 | 说明 |
 | ---- | ---- | ---- |
 | `send_window` | `23:30`–`00:30` | 允许自动开始的时间窗（**本地时**），只约束开始时刻 |
-| `accounts` | 1 个 `main` | 多账号：每项含 `name` / `storage_file` / `state_file`，可加 `account` / `password`。**不能为空**：`src/config.py::preflight()` 会拦下空列表、非对象条目、缺 `name` 的条目，退出码 5（见 [operations.md](operations.md) 的退出码一节） |
+| `accounts` | **必填，无默认** | 多账号：每项含 `name` / `storage_file` / `state_file`，可加 `account` / `password`。缺这一项时整轮什么都不做（`src/config.py` 只告警不补 `main`） |
 | `auto_login` | `true` | 登录态失效时用 `accounts` 里的账号密码重登（**凭据来自 config.json，不是 .env**） |
-| `headless` | `false` | **必须为 false**。抖音会拦无头；弱机无头渲染容易挂死 |
-| `display` | `:99` | Xvfb 虚拟显示编号。留空合法，含义是「用当前进程的 `DISPLAY`」（配置留空、环境也没有合法 `DISPLAY` 才算错）。**只给 `spark.py` 用**（`src/session.py` 启动浏览器时把它注入 `DISPLAY`）；人工登录 `login.py` 读的是当前 shell 的 `DISPLAY`，见 README「登录用的是当前 X 显示」 |
+| `headless` | `false` | **必须为 false**。抖音会拦无头；弱机无头渲染容易挂死。漏写这个键时 `src/session.py::DEFAULT_HEADLESS` 也按 `false`（有头）处理——2026-11-19 审计把旧默认 `True` 改掉了，因为「漏写键 = 静默无头」只会在第二天巡检里才被发现 |
+| `display` | `:99` | Xvfb 虚拟显示编号 |
 | `perf_profile` | `low` | `low`=低配机 / `mid`=普通笔记本 / `high`=高性能机（决定浏览器参数与全套等待上限） |
 | `browser_reuse` | `true` | 多好友共享一个浏览器实例 |
 | `browser_recycle_mem_mb` | `300` | 复用模式下，`MemAvailable` 低于该值就回收浏览器实例 |
-| `block_resources` | `true` | 拦截图片/字体/媒体，省带宽与内存 |
+| `block_resources` | `true` | 只拦 `media`（视频/音频）。图片与字体**故意放行**：一张图都不加载是极强的机器人特征，且实测对常驻内存（RSS）没有帮助（`src/session.py` 的 `_BLOCKED_TYPES` 注释） |
 | `self_heal` | `true` | 错误分类 → 本地策略恢复（可用 `SPARK_SELF_HEAL=0` 关掉） |
-| `vision_fallback` | `true` | 视觉兜底：四条 DOM 策略全失效时，用多模态模型粗定位 + DOM 现场取证找回会话行。`vision_provider` 指定主用来源（默认 `agnes`，备 `glm`）。**没配任何模型 key 时自动空转**（日志一行「未配置视觉模型 key…跳过」），不会影响主流程。可用 `SPARK_VISION=0` 关掉 |
+| `vision_fallback` | `true` | 视觉兜底（`vision_provider` 指定多模态来源；无 key 时自动跳过） |
+| `vision_provider` | `agnes` | 视觉兜底用哪家模型（`src/vision.py` 读；`SPARK_VISION` 可临时覆盖） |
+| `extends` | — | 继承另一份配置，**只支持一层**（`config.dev.json` 靠它 extends 生产配置）；相对路径按本配置文件所在目录解析 |
 | `notify_cmd` | `""` | 失败告警命令，`HEALTH_FAIL_MSG` 环境变量带原因 |
 
 ## 环境变量
@@ -29,7 +31,12 @@
 | `SPARK_PERF_<KNOB>` | 临时覆盖单个等待/超时参数，排查用 |
 | `SPARK_DEADLINE_EPOCH` | 硬截止时刻，由 `run_cron.sh` 注入，给补扫算余量 |
 | `SPARK_SELF_HEAL` | `0` 关闭自愈 |
-| `SPARK_SKIP_PID_LOCK` | 跳过 PID 锁（只给测试用，**别在线上开**） |
+| `SPARK_SKIP_PID_LOCK` | 跳过 PID 锁（主任务持锁时跑验证子进程专用；**别在线上开**） |
+| `SPARK_LOG_FILE` | 指定日志文件（`logutil.py`）；不设时落 `runtime/spark.log` |
+| `SPARK_DISPLAY` | `run_cron.sh` 用它在启动前注入 `DISPLAY`（默认 `:99`）；必须早于浏览器启动，事后改 `os.environ` 对已拉起的驱动无效 |
+| `SPARK_VISION` | 覆盖 `vision_provider` |
+
+调试开关（默认行为即生产行为，改它们只是在排查单点时用）：`SPARK_PANEL_WAIT_MS`（表情面板等待）、`SPARK_SEND_GAP`（好友间停顿，如 `"3,15"`）、`SPARK_REUSE_PAGE` / `SPARK_PAGE_REUSE_MAX`（页面复用开关与上限）、`SPARK_SKIP_RELOAD`（跳过会话列表刷新）、`SPARK_PERF_SEND_GAP_MS`（拟人化停顿，归 `perf.py` 管）。
 
 ## 性能档位
 
@@ -52,3 +59,8 @@
 ## 配置与其它地方的一致性
 
 改运行时机（`send_window`、cron 时刻）必须四方一致：`config.json` × `src/config.py` × crontab × 文档。历史上曾误用 UTC 导致窗口永远不命中、静默不发送（退出码 0、日志无异常），**勿再引入时区换算**。
+
+两个已知的不一致（2026-11-19 审计记录，暂不改代码，改前先想清楚）：
+
+1. **巡检不认 `SPARK_CONFIG` / `SPARK_RUNTIME_DIR`**：`src/health_check.py` 自己按 `Path(__file__).parent.parent / "runtime"` 定位状态与日志。也就是说开发目录（`runtime-dev/`）跑出来的东西，巡检看不到；上板后两者同路径，所以生产无感。
+2. **不是所有键都由 `src/config.py` 读**：`headless` / `display` / `auto_login` / `notify_cmd` / `vision_*` 由各自的消费方直接读 `cfg`，`config.py` 只负责补默认值与归一（`perf_profile`、`accounts[].*_file`）。加字段时两种路径都有人用，别假设「config.py 里搜不到 = 没人读」。

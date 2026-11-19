@@ -221,7 +221,7 @@ class TestDiscoverPendingFriends(unittest.TestCase):
 
 
 class TestDiscoveryWarnOnce(unittest.TestCase):
-    """遗留问题①: 「无火花标记」告警只在整轮发现结束后判定一次。
+    """会话19 遗留①: 「无火花标记」告警只在整轮发现结束后判定一次。
 
     _run_discover 每个滚动 pass 都会调用; 中间 pass 火花图标尚未渲染时不应告警。
     """

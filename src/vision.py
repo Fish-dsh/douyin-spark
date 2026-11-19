@@ -13,50 +13,9 @@
 读出并核对**。坐标偏一行会让取证落到相邻的真实行上, 而该行若无火花图标即被丢弃,
 不会「点错好友发错人」——这在结构上杜绝了错发的可能。
 
-**脱敏**(用户要求「裁剪+打码后发」): 外发前用 DOM 注入黑色遮罩盖住**整个视口**的
-全部文本(昵称/消息预览/时间/右侧已打开的会话记录), 以及一切可能把用户内容画进
-截图、但**不在文本节点里**的载体:
-
-  - 位图: `img`、SVG 的 `image`/`use`(同样能加载位图, 只扫 `img` 会整块漏)
-  - 值/自绘/画面: `input`/`textarea`/`select` 的值、`canvas`(含"正在输入"动画)、
-    `video`, 以及读不到 DOM 的跨源 `iframe`(读不到就整块盖, 不猜它是空的)
-  - CSS 通道: `background-image`、`mask-image`/`-webkit-mask-image`、
-    `border-image-source`, 以及 `::before`/`::after` 有可见 `content` 的宿主元素
-
-只保留火花图标与火花底图(行定位必需)。放行条件是三条**同时**成立: URL/样式命中
-`flame|fire|streak|spark`、渲染尺寸落在图标区间(8~48px)、且不在 `a[href*="/user/"]`
-内(头像通常包在用户主页链接里)。任一条不满足就走打码 —— 失败方向永远是「盖住」;
-旧版只看关键词, 普通头像 URL 撞上 `spark` 就被整块放行, 等于没打码。
-
-**所有扫描都进 open shadow root**(会话项里有 shadow host, 只从 `document.body` 起
-`querySelectorAll` 会把整片 shadow DOM 漏掉, 而返回的计数照样漂亮)。
-
-**读不到的组件整块盖住**: `el.shadowRoot` 为 null 无法区分「没有 shadow DOM」与
-「用了闭合(closed) shadow root」。对能确认内容不来自 light DOM 的宿主 —— 自定义
-元素(标签名含连字符)、无 open shadow root、自身没有子节点、却有渲染尺寸 —— 一律
-整块遮罩并计入 `unreadable`。闭合 root 里若有火花图标会被一起盖掉, 这是有意的:
-宁可这次定位失败退回 DOM 取证, 也不把读不到的内容发出去。
-
-**覆盖闸门**(四道, 任一不过就放弃截图并退回 DOM 取证 —— 脱敏链上"看着成功其实
-什么都没做"是最坏的一种失败, 因为它不报错):
-
-  1. 脚本必须回报结构化结果
-     `{masked, textNodes, uncovered, unverified, unreadable, keptFlame}`;
-  2. `masked > 0`: 一处都没遮, 说明这次遍历根本没找到东西(骨架屏/改版/空白页);
-  3. `uncovered == 0`: 拿遮罩元素**渲染后**的矩形复核对**每一个**文本矩形 ——
-     遮罩矩形栅格化到 2px 网格, 要求矩形(内缩 1px)覆盖到的网格点全部被占住。
-     `position:fixed` 落在被 `transform`/`filter` 的祖先里时会相对那个祖先定位 ——
-     那时数组是对的、屏幕上是错的。只判 `masked > 0` 抓不到这种「加了没盖上」,
-     只判矩形中心点也抓不到「中间盖住了、上下露着」;
-  4. `unverified == 0`: 覆盖复核有计算预算(防超大 DOM 卡死主线程), 预算耗尽时
-     剩下的文本块是「没验证过」而不是「盖住了」。无法证明就必须放弃截图。
-
-历次修正都发生在 2026-11-19: 最初只盖左栏 45%(右侧会话明文外发) → 补输入框/
-canvas/video/背景图 → 补 shadow DOM / iframe / 伪元素 / 覆盖闸门 → 非文本扫描也走
-shadow root、补 mask/border-image 与 SVG 位图、火花放行收窄、加覆盖自检 → 覆盖自检
-从「抽样看中心点」改成「全量逐点 + 预算兜底」、闭合 shadow 宿主整块盖。昵称不来自
-模型, 它由本地 DOM 回填, 故打码不影响功能。以后新增任何可视元素, 都该按「会不会把
-用户内容画进截图」重新过一遍。
+**脱敏**(用户要求「裁剪+打码后发」): 外发前用 DOM 注入黑色遮罩盖住左栏**全部文本**
+(昵称/消息预览/时间)与**头像 img**(人脸), 只保留火花图标(判定需要, 且按 src
+关键词保留, 与类名无关)。昵称不来自模型 —— 它由本地 DOM 回填, 故打码不影响功能。
 
 **可用性**: 主用 AGNES(`agnes-2.5-flash`, 实测不限流、约 1.5s, 但坐标偏一行);
 备用 GLM(`glm-4.6v-flash`, 坐标准但免费档常限流)。都失败/未配置 → 返回空表,
@@ -107,23 +66,7 @@ _PROVIDERS: dict[str, dict] = {
         "env": "ZHIPU_API_KEY",
     },
 }
-# 凭据来源(按优先级): 环境变量 AGNES_API_KEY / ZHIPU_API_KEY > 本文件。
-# 默认值指向某台开发机上私有 CLI 的登录缓存, 对陌生人是无意义的路径;
-# 用自己的凭据文件就设 SPARK_VISION_AUTH_FILE=/path/to/auth.json(或 config.json
-# 的 vision_auth_file), 格式 {"agnes": {"key": "..."}, "glm": {"key": "..."}}。
-# 都拿不到 key 时本模块自动空转, 主链路不受影响。
-_DEFAULT_AUTH_FILE = Path.home() / ".pi" / "agent" / "auth.json"
-
-
-def _auth_file() -> Path:
-    """凭据文件路径: env SPARK_VISION_AUTH_FILE > config.vision_auth_file > 默认。"""
-    env = os.environ.get("SPARK_VISION_AUTH_FILE", "").strip()
-    if env:
-        return Path(env).expanduser()
-    cfg_path = str(_config().get("vision_auth_file") or "").strip()
-    if cfg_path:
-        return Path(cfg_path).expanduser()
-    return _DEFAULT_AUTH_FILE
+_PI_AUTH_FILE = Path.home() / ".pi" / "agent" / "auth.json"
 
 _PROMPT = (
     "这是抖音网页版聊天页截图, 左侧是会话列表。图中敏感文字与头像已被黑色遮罩盖住, "
@@ -133,153 +76,33 @@ _PROMPT = (
     "按从上到下顺序输出所有能看到的会话行; 若无法判断则输出 []。"
 )
 
-# ── 脱敏: 用固定定位的黑色遮罩盖住整屏文本与图像载体(非破坏性, 截图后立即移除) ──
-_JS_REDACT = r"""
+# ── 脱敏: 用固定定位的黑色遮罩盖住左栏文本与头像(非破坏性, 截图后立即移除) ──
+_JS_REDACT = """
 () => {
   const vw = window.innerWidth, vh = window.innerHeight;
-  // 2026-11-19 修正: 原先只脱敏左侧 45%(limitX 取视口宽度的四成半), 右侧已打开的
-  // 会话内容会明文外发 —— 点击好友前/定位失败时右侧往往正挂着上一个会话的记录。
-  // 现在覆盖整个视口。
-  const limitX = vw;
+  const limitX = vw * 0.45;           // 只脱敏左侧会话栏, 不动右侧消息区
   const boxes = [];
-  // 遍历入口: 除了 document.body, 还要进 open shadow root —— 抖音的会话项里确实
-  // 有 shadow host, createTreeWalker(document.body) 走不进去, 于是那部分内容
-  // 一个遮罩都不会生成(而脚本本身返回的计数还算漂亮, 掩盖了这个漏)。
-  //
-  // 2026-11-19 补: 以前只有「文本遍历」走 roots, img / 表单与媒体元素 / CSS 承载
-  // 图像三条扫描还在用 document.querySelectorAll —— shadow root 里的头像、canvas、
-  // 背景图因此一个都没盖。现在**所有**扫描都走 roots。
-  const roots = [document.body];
-  for (let i = 0; i < roots.length; i++) {
-    for (const el of roots[i].querySelectorAll('*')) {
-      if (el.shadowRoot) roots.push(el.shadowRoot);   // 闭包 shadow 拿不到, 尽力
-    }
+  const walker = document.createTreeWalker(
+    document.body, NodeFilter.SHOW_TEXT, null
+  );
+  let node;
+  while ((node = walker.nextNode())) {
+    if (!(node.textContent || '').trim()) continue;
+    const p = node.parentElement;
+    if (!p) continue;
+    const r = p.getBoundingClientRect();
+    if (r.width < 1 || r.height < 1) continue;
+    if (r.left > limitX || r.bottom < 0 || r.top > vh) continue;
+    boxes.push([r.left, r.top, r.width, r.height]);
   }
-  const visible = (r) =>
-    r.width >= 1 && r.height >= 1 &&
-    r.right > 0 && r.left < vw && r.bottom > 0 && r.top < vh;
-  const push = (r) => boxes.push([r.left, r.top, r.width, r.height]);
-  const pushEl = (el) => {
-    const r = el.getBoundingClientRect();
-    if (visible(r)) push(r);
-  };
-  const inOverlay = (el) => !!(el.closest && el.closest('#__spark_redact__'));
-  // 火花图标要留着(行定位靠它), 但「URL 里含 flame|fire|streak|spark」这一条太宽:
-  // 普通头像/贴纸的 URL 只要撞上关键词就被放行, 那等于没打码。现在的放行条件是
-  // 三条同时成立:
-  //   1) URL/样式里命中关键词;
-  //   2) 渲染出来是图标尺寸(8~48px) —— 火花是固定小图标, 头像/贴纸很少这么小;
-  //   3) 不在用户主页链接里 —— 头像通常包在 a[href*="/user/"] 内。
-  // 缺一条就走打码。失败方向永远是「盖住」。
   const flame = /(flame|fire|streak|spark)/i;
-  const iconSized = (el) => {
-    const r = el.getBoundingClientRect();
-    return r.width >= 8 && r.width <= 48 && r.height >= 8 && r.height <= 48;
-  };
-  const inUserLink = (el) => {
-    let p = el;
-    for (let i = 0; i < 4 && p; i++) {
-      if (p.tagName === 'A' && /\/user\//.test(String(p.getAttribute('href') || ''))) {
-        return true;
-      }
-      p = p.parentElement;
-    }
-    return false;
-  };
-  const keepFlame = (el, s) =>
-    !!s && flame.test(s) && iconSized(el) && !inUserLink(el);
-  let keptFlame = 0;
-  // 1) 文本节点(含 open shadow root)
-  const textRects = [];
-  for (const root of roots) {
-    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, null);
-    let node;
-    while ((node = walker.nextNode())) {
-      if (!(node.textContent || '').trim()) continue;
-      const p = node.parentElement || node.parentNode;
-      if (!p || !p.getBoundingClientRect) continue;
-      if (inOverlay(p)) continue;
-      const r = p.getBoundingClientRect();
-      if (!visible(r)) continue;
-      textRects.push(r);
-      push(r);
-    }
-  }
-  // 2) 图像载体: img 与 SVG 里的 image/use(同样能加载位图, 以前完全没扫),
-  //    以及输入控件/画布/视频/跨源 iframe。
-  //    input/textarea/select 的值不在文本节点里(输入框里正打着的话会被截进去);
-  //    canvas 是自绘(含"正在输入"动画等), video 是真画面; iframe 跨源读不到内容,
-  //    读不到时「整块盖住」比「猜它是空的」安全。
-  for (const root of roots) {
-    for (const node of root.querySelectorAll('img, svg image, svg use')) {
-      const s = String(
-        node.getAttribute('src') || node.getAttribute('href') ||
-        node.getAttribute('xlink:href') || node.src || ''
-      );
-      if (keepFlame(node, s)) { keptFlame++; continue; }
-      pushEl(node);
-    }
-    for (const el of root.querySelectorAll(
-      'input, textarea, select, canvas, video, iframe'
-    )) {
-      pushEl(el);
-    }
-  }
-  // 3) CSS 承载的图像与伪元素文字。
-  //    background-image 在 SPA 里很常见; mask-image / border-image 同样是位图通道
-  //    (以前没扫, 用它们做头像/贴纸的节点会整块漏掉); ::before/::after 的 content
-  //    是可见文字, 文本节点遍历拿不到, 只能按宿主元素整块盖。
-  for (const root of roots) {
-    for (const el of root.querySelectorAll('*')) {
-      if (inOverlay(el)) continue;
-      let cs;
-      try { cs = getComputedStyle(el); } catch (e) { continue; }
-      if (!cs) continue;
-      let pseudo = '';
-      try {
-        const b = getComputedStyle(el, '::before').content || '';
-        const a = getComputedStyle(el, '::after').content || '';
-        pseudo = b + a;
-      } catch (e) { pseudo = ''; }
-      const hasPseudo =
-        !!pseudo && pseudo !== 'none' && pseudo !== 'normal' &&
-        pseudo.replace(/["']/g, '').trim().length > 0;
-      const carriers = [
-        cs.backgroundImage, cs.maskImage, cs.webkitMaskImage, cs.borderImageSource
-      ];
-      let hasCarrier = false, allFlame = true;
-      for (const c of carriers) {
-        if (!c || c === 'none') continue;
-        hasCarrier = true;
-        if (c.indexOf('url(') < 0 || !flame.test(c)) allFlame = false;
-      }
-      if (!hasCarrier && !hasPseudo) continue;
-      if (hasCarrier && !hasPseudo && allFlame && keepFlame(el, 'flame')) {
-        keptFlame++;
-        continue;   // 火花底图保留
-      }
-      pushEl(el);
-    }
-  }
-  // 4) 读不到的组件。`el.shadowRoot` 为 null 既可能是「根本没有 shadow DOM」,
-  //    也可能是「用了闭合(closed) shadow root」—— 两者在脚本里无法区分, 而闭合 root
-  //    里的昵称/头像不会进 roots, 前面三条扫描一个都命中不了它, 计数却照样漂亮。
-  //    兜底只针对能确认「内容不是来自 light DOM」的宿主: 自定义元素(标签名含连字符)、
-  //    没有 open shadow root、自身没有子节点、却有渲染尺寸。这种宿主整块盖住。
-  //    闭合 root 里若藏着火花图标, 它会一起被盖掉 —— 这是有意的选择: 宁可这次定位
-  //    失败退回 DOM 取证, 也不把读不到的内容发出去。
-  let unreadable = 0;
-  for (const root of roots) {
-    for (const el of root.querySelectorAll('*')) {
-      if (inOverlay(el)) continue;
-      if (String(el.tagName || '').indexOf('-') < 0) continue;
-      if (el.shadowRoot) continue;
-      if (el.childNodes && el.childNodes.length > 0) continue;
-      const r = el.getBoundingClientRect();
-      if (!visible(r) || r.width < 4 || r.height < 4) continue;
-      unreadable++;
-      push(r);
-    }
+  for (const img of document.querySelectorAll('img')) {
+    const r = img.getBoundingClientRect();
+    if (r.width < 6 || r.height < 6) continue;
+    if (r.left > limitX || r.bottom < 0 || r.top > vh) continue;
+    const s = String(img.src || img.getAttribute('src') || '');
+    if (flame.test(s)) continue;      // 火花图标保留: 判定需要, 且与类名无关
+    boxes.push([r.left, r.top, r.width, r.height]);
   }
   const wrap = document.createElement('div');
   wrap.id = '__spark_redact__';
@@ -288,71 +111,11 @@ _JS_REDACT = r"""
   for (const b of boxes) {
     const d = document.createElement('div');
     d.style.cssText = 'position:fixed;background:#000;border-radius:2px;' +
-      'left:' + b[0] + 'px;top:' + b[1] + 'px;' +
-      'width:' + b[2] + 'px;height:' + b[3] + 'px;';
+      `left:${b[0]}px;top:${b[1]}px;width:${b[2]}px;height:${b[3]}px;`;
     wrap.appendChild(d);
   }
   document.body.appendChild(wrap);
-  // 覆盖自检: 拿遮罩元素**渲染后**的矩形去复核文本矩形, 而不是拿 boxes 数组自证。
-  // position:fixed 落在被 transform/filter 的祖先里时会相对那个祖先定位 —— 那时
-  // 数组是对的、屏幕上是错的。这一步把这种「看着加了遮罩其实没盖上」抓出来。
-  //
-  // 2026-11-19 再收紧: 旧版只复核前 400 个文本矩形、且只判矩形**中心点**落没落在
-  // 某个遮罩里 —— 超出 400 的那批完全不验证, 而矩形中心被盖住、上下却露出同样算通过。
-  // 现在把遮罩矩形栅格化到 2px 网格, 对**每一个**文本矩形要求(内缩 1px 容忍亚像素
-  // 圆整)其覆盖范围内的网格点**全部**被遮罩占住。工作量用预算兜底: 预算耗尽不是
-  // 「通过」而是 unverified —— 脱敏链上「没法证明盖住了」必须等于「放弃这次截图」。
-  const maskRects = [];
-  for (const d of wrap.children) maskRects.push(d.getBoundingClientRect());
-  const CELL = 2, INSET = 1;
-  const gw = Math.max(1, Math.ceil(vw / CELL)), gh = Math.max(1, Math.ceil(vh / CELL));
-  const grid = new Uint8Array(gw * gh);
-  for (const m of maskRects) {
-    const x0 = Math.max(0, Math.floor(m.left / CELL));
-    const x1 = Math.min(gw - 1, Math.ceil(m.right / CELL) - 1);
-    const y0 = Math.max(0, Math.floor(m.top / CELL));
-    const y1 = Math.min(gh - 1, Math.ceil(m.bottom / CELL) - 1);
-    if (x1 < x0 || y1 < y0) continue;              // 整块在视口外
-    for (let y = y0; y <= y1; y++) {
-      const row = y * gw;
-      for (let x = x0; x <= x1; x++) grid[row + x] = 1;
-    }
-  }
-  let uncovered = 0, unverified = 0, budget = 4000000;
-  const fullyCovered = (r) => {
-    let x0 = Math.floor((r.left + INSET) / CELL);
-    let x1 = Math.floor((r.right - INSET) / CELL);
-    let y0 = Math.floor((r.top + INSET) / CELL);
-    let y1 = Math.floor((r.bottom - INSET) / CELL);
-    if (x1 < x0 || y1 < y0) {                      // 比 INSET 还小的碎块: 退回中心点
-      x0 = x1 = Math.floor((r.left + r.width / 2) / CELL);
-      y0 = y1 = Math.floor((r.top + r.height / 2) / CELL);
-    }
-    x0 = Math.max(0, x0); x1 = Math.min(gw - 1, x1);
-    y0 = Math.max(0, y0); y1 = Math.min(gh - 1, y1);
-    if (x1 < x0 || y1 < y0) return true;           // 整块在视口外, 看不见不算漏
-    for (let y = y0; y <= y1; y++) {
-      const row = y * gw;
-      for (let x = x0; x <= x1; x++) {
-        if (budget-- <= 0) return null;            // 预算耗尽, 交给调用方记 unverified
-        if (!grid[row + x]) return false;
-      }
-    }
-    return true;
-  };
-  for (let i = 0; i < textRects.length; i++) {
-    const ok = fullyCovered(textRects[i]);
-    if (ok === null) { unverified = textRects.length - i; break; }
-    if (!ok) uncovered++;
-  }
-  return {
-    masked: boxes.length,
-    textNodes: textRects.length,
-    uncovered: uncovered,
-    unverified: unverified,
-    unreadable: unreadable,
-    keptFlame: keptFlame
-  };
+  return boxes.length;
 }
 """
 
@@ -462,7 +225,7 @@ def _api_key(provider: str) -> str:
     if env_key:
         return env_key
     try:
-        data = json.loads(_auth_file().read_text(encoding="utf-8"))
+        data = json.loads(_PI_AUTH_FILE.read_text(encoding="utf-8"))
         return str((data.get(provider) or {}).get("key") or "").strip()
     except Exception:
         return ""
@@ -478,64 +241,14 @@ def _provider_chain() -> list[str]:
 
 
 def _inject_redaction(page) -> bool:
-    """注入脱敏遮罩; 只返回 True 的条件是**真的遮到了东西且复核通过**。
-
-    "脚本没抛异常" 不等于"遮住了": 页面还在骨架屏、选择器改版、或者落在一个
-    空白页上时, 遍历找不到任何文本节点和头像, 返回 0 —— 以前这里照样 return
-    True, 于是 /_redacted_screenshot 拍下一张**完全没打码**的整屏, 直接发给外部
-    模型。脱敏链路上"看着成功其实什么都没做"是最坏的一种失败: 它静默。
-
-    所以这里有四道闸门, 任何一道不过就放弃截图, 让调用方退回 DOM 取证:
-      1) 脚本必须回报一个结构化结果
-         (masked/textNodes/uncovered/unverified/unreadable/keptFlame);
-      2) masked 必须 > 0 —— 一处都没遮说明这次遍历根本没找到东西;
-      3) uncovered 必须 == 0 —— 遮罩元素**渲染后**的矩形必须覆盖每个文本矩形
-         (2px 栅格逐点判定, 不是只看中心点), 最常见的原因是 position:fixed 的
-         遮罩落在了被 transform/filter 的祖先里, 于是"数组里加了、屏幕上没盖";
-      4) unverified 必须 == 0 —— 覆盖复核有计算预算, 预算耗尽时剩下的文本块是
-         "没验证过"而不是"盖住了"。旧版直接把超出 400 个的部分当通过, 等于在
-         最该保守的地方乐观。脱敏链上"没法证明盖住了"必须等于"放弃这次截图"。
-    """
     try:
         n = page.evaluate(_JS_REDACT)
+        log(f"[vision] 已注入脱敏遮罩 {n} 处(文本+头像, 保留火花图标)")
+        return True
     except Exception as exc:
         log(f"[vision] 注入脱敏遮罩失败: {exc}")
         return False
-    if not isinstance(n, dict):
-        log(f"[vision] 脱敏脚本返回了非结构化结果 {n!r}, 无法确认覆盖, 放弃本次截图")
-        return False
-    try:
-        masked = int(n.get("masked", 0))
-        uncovered = int(n.get("uncovered", 0))
-        unverified = int(n.get("unverified", 0))
-        unreadable = int(n.get("unreadable", 0))
-        text_nodes = int(n.get("textNodes", 0))
-        kept = int(n.get("keptFlame", 0))
-    except (TypeError, ValueError):
-        log(f"[vision] 脱敏脚本的计数不是整数 {n!r}, 无法确认覆盖, 放弃本次截图")
-        return False
-    if masked <= 0:
-        log("[vision] 脱敏遮罩命中 0 处, 无法确认覆盖, 放弃本次截图")
-        return False
-    if uncovered > 0:
-        log(
-            f"[vision] 有 {uncovered} 个文本块没被遮罩盖住"
-            "(常见原因: 遮罩落在 transform/filter 祖先里, fixed 定位偏移), "
-            "放弃本次截图"
-        )
-        return False
-    if unverified > 0:
-        log(
-            f"[vision] 有 {unverified} 个文本块的覆盖没能在预算内复核完"
-            "(会话列表过大), 无法证明已盖住, 放弃本次截图"
-        )
-        return False
-    log(
-        f"[vision] 已注入脱敏遮罩 {masked} 处"
-        f"(文本节点 {text_nodes}, 读不到的组件 {unreadable}, 保留火花图标 {kept}), "
-        "复核每个文本矩形都被盖住"
-    )
-    return True
+
 
 def _remove_redaction(page) -> None:
     try:
@@ -695,8 +408,8 @@ def locate_rows(page) -> list[dict]:
             return []
         if not _provider_chain():
             log(
-                "[vision] 未配置视觉模型 key(AGNES_API_KEY/ZHIPU_API_KEY, 或 "
-                "SPARK_VISION_AUTH_FILE/config.vision_auth_file 指向的凭据文件), 跳过"
+                "[vision] 未配置视觉模型 key(AGNES_API_KEY/ZHIPU_API_KEY 或 "
+                "~/.pi/agent/auth.json), 跳过"
             )
             return []
         shot = _redacted_screenshot(page)

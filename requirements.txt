@@ -1,12 +1,4 @@
-# 运行时依赖 —— 只跑主链路(发火花)需要的就这一条。
-# 装了它 spark.py 就能跑; 另外两个文件是可选的, 见下。
 playwright==1.52.0
-
-# 可选依赖不在这个文件里, 否则「pip install -r requirements.txt」会连视觉库和
-# lint 工具一起装上 —— 板子只有 1.5G 内存, opencv 那包解压出来比整份代码还大。
-#
-#   requirements-vision.txt  视觉兜底定位层(src/vision_cv.py)的 CV 粗定位
-#   requirements-dev.txt     开发/CI: ruff + pytest(跑 lint 和单测)
-#
-# 生产板子装了 vision 那份, 但不是必须的: 没装时 src/vision_cv.py 里 cv2=None,
-# 该层自动放弃, 主链路不受影响。
+ruff==0.16.8
+# Emergency Visual Fallback 定位层 (src/vision_cv.py); 未安装时该层自动降级放弃, 主链路不受影响
+opencv-python-headless==5.0.0.93

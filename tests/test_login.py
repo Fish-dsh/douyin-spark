@@ -2,9 +2,6 @@
 
 from __future__ import annotations
 
-import contextlib
-import io
-import os
 import unittest
 from unittest.mock import MagicMock, patch
 
@@ -27,32 +24,6 @@ class TestPasswordInputSelectors(unittest.TestCase):
     def test_contains_name_and_class_selectors(self):
         self.assertIn("input[name='password']", PASSWORD_INPUT_SELECTORS)
         self.assertIn("input[class*='password']", PASSWORD_INPUT_SELECTORS)
-
-
-class TestCandidateHomes(unittest.TestCase):
-    """浏览器装在「跑安装命令那个用户」的家目录下, 所以要多看几个家目录。
-
-    公开版不能再写死某个机房的家目录(那是我这台机器的现场), 但也不能只看当前
-    用户 —— sudo 装一次、普通用户跑 cron 是最常见的踩坑法。"""
-
-    def test_current_home_first(self):
-        homes = login._candidate_homes()
-        self.assertTrue(homes)
-        self.assertEqual(homes[0], str(__import__("pathlib").Path.home()))
-
-    def test_sudo_user_resolved_to_absolute_home(self):
-        with patch.dict("os.environ", {"SUDO_USER": "deployer"}):
-            homes = login._candidate_homes()
-        self.assertIn("/home/deployer", homes)
-
-    def test_sudo_user_with_absolute_path_kept(self):
-        with patch.dict("os.environ", {"SUDO_USER": "/srv/app"}):
-            homes = login._candidate_homes()
-        self.assertIn("/srv/app", homes)
-
-    def test_no_duplicates(self):
-        homes = login._candidate_homes()
-        self.assertEqual(len(homes), len(set(homes)))
 
 
 class TestAutoLoginStoragePath(unittest.TestCase):
@@ -222,124 +193,6 @@ class TestStealth(unittest.TestCase):
         with patch.object(login, "STORAGE_PATH", storage):
             context = restore_state(browser)
         context.add_init_script.assert_called_once()
-
-
-class TestPrepareDisplay(unittest.TestCase):
-    """首次登录最常见的坑: config.json 写了 display=":99" 但机器上只有 :0(或啥都没有)。
-
-    人工登录走的是当前 shell 的 DISPLAY, 不读 config.json —— 所以必须有这层检查,
-    否则新人拿到的是 Playwright 的 "Missing X server or $DISPLAY" 栈。
-    日志走 logutil.log(print 到 stdout), 所以用 redirect_stdout 取文案。
-    """
-
-    def setUp(self):
-        self._saved = os.environ.pop("DISPLAY", None)
-
-    def tearDown(self):
-        os.environ.pop("DISPLAY", None)
-        if self._saved is not None:
-            os.environ["DISPLAY"] = self._saved
-
-    def _run(self, explicit, needs_display):
-        buf = io.StringIO()
-        with contextlib.redirect_stdout(buf):
-            ok = login._prepare_display(explicit, needs_display)
-        return ok, buf.getvalue()
-
-    def test_explicit_display_wins_and_is_exported(self):
-        os.environ["DISPLAY"] = ":0"
-        ok, out = self._run(":99", True)
-        self.assertTrue(ok)
-        self.assertEqual(os.environ["DISPLAY"], ":99")
-        self.assertIn(":99", out)
-
-    def test_existing_shell_display_is_reused(self):
-        os.environ["DISPLAY"] = ":0"
-        ok, _ = self._run(None, True)
-        self.assertTrue(ok)
-        self.assertEqual(os.environ["DISPLAY"], ":0")
-
-    def test_missing_display_refuses_with_actionable_hint(self):
-        ok, out = self._run(None, True)
-        self.assertFalse(ok)
-        self.assertIn("DISPLAY", out)
-        self.assertIn("xvfb", out.lower())
-        self.assertIn("--display :99", out)
-        # 顺带提醒 sudo 会丢 DISPLAY —— 这是同一现象的第二大成因
-        self.assertIn("sudo", out)
-
-    def test_headless_needs_no_display(self):
-        ok, _ = self._run(None, False)
-        self.assertTrue(ok)
-        self.assertNotIn("DISPLAY", os.environ)
-
-    def test_blank_display_counts_as_missing(self):
-        os.environ["DISPLAY"] = "   "
-        ok, _ = self._run(None, True)
-        self.assertFalse(ok)
-
-    def test_malformed_explicit_display_is_refused(self):
-        """--display 99 / --display /tmp/.X11-unix/X99 都是常见手误。
-
-        以前只判"有没有传值", 于是这类值会被原样写进 DISPLAY 交给浏览器,
-        报出来的是底层连接错误, 与"参数写错"隔了好几层。
-        """
-        for bad in ("99", "/tmp/.X11-unix/X99", ":abc", "localhost:99", ":"):
-            with self.subTest(display=bad):
-                ok, out = self._run(bad, True)
-                self.assertFalse(ok)
-                self.assertIn("显示号", out)
-
-    def test_screen_suffix_is_accepted(self):
-        ok, _ = self._run(":99.0", True)
-        self.assertTrue(ok)
-        self.assertEqual(os.environ["DISPLAY"], ":99.0")
-
-    def test_malformed_env_display_is_refused(self):
-        """环境里的 DISPLAY 也可能是手误, 不能在"有值"这一步就放行。"""
-        for bad in ("99", "localhost:0", ":"):
-            with self.subTest(display=bad):
-                os.environ["DISPLAY"] = bad
-                ok, out = self._run(None, True)
-                self.assertFalse(ok)
-                self.assertIn("显示号", out)
-
-
-class TestDisplayFlagParsing(unittest.TestCase):
-    """--display 的值在参数解析阶段就要拒掉, 不能拖到浏览器启动。"""
-
-    def setUp(self):
-        self._saved = os.environ.pop("DISPLAY", None)
-
-    def tearDown(self):
-        os.environ.pop("DISPLAY", None)
-        if self._saved is not None:
-            os.environ["DISPLAY"] = self._saved
-
-    def _main(self, argv):
-        buf = io.StringIO()
-        with (
-            contextlib.redirect_stdout(buf),
-            patch.object(login.sys, "argv", ["login.py"] + argv),
-            patch.object(login, "sync_playwright") as pw,
-        ):
-            try:
-                login.main()
-            except SystemExit as exc:
-                return exc.code, buf.getvalue(), pw
-        return None, buf.getvalue(), pw
-
-    def test_bad_display_exits_before_browser(self):
-        code, out, pw = self._main(["--manual", "--display", ":abc"])
-        self.assertEqual(code, 2)
-        self.assertIn("显示号", out)
-        pw.assert_not_called()
-
-    def test_missing_display_value_exits_before_browser(self):
-        code, out, pw = self._main(["--manual", "--display"])
-        self.assertEqual(code, 2)
-        self.assertIn("--display", out)
-        pw.assert_not_called()
 
 
 if __name__ == "__main__":

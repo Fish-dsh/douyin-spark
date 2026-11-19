@@ -352,7 +352,7 @@ def _run_discover(page) -> list[dict]:
         log(f"[spark] 检测策略: {', '.join(methods_used)}")
 
     # 注意: 不要在此处告警「无火花标记」。本函数每个滚动 pass 都会被调用, 中间 pass
-    # 火花图标尚未渲染时会误报(遗留问题①)。改由调用方在汇总后判定, 见
+    # 火花图标尚未渲染时会误报(会话19 遗留①)。改由调用方在汇总后判定, 见
     # discover_friends_with_spark。
     return list(seen.values())
 

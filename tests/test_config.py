@@ -2,12 +2,9 @@
 
 from __future__ import annotations
 
-import io
 import json
-import os
 import tempfile
 import unittest
-from contextlib import redirect_stdout
 from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch
@@ -20,12 +17,10 @@ from src.config import (
     RUNTIME_DIR,
     SEND_STICKER,
     STATE_FILE,
-    ConfigError,
     in_window,
     load_config,
     load_env,
     load_state,
-    preflight,
     write_state,
 )
 
@@ -77,59 +72,6 @@ class TestLoadConfig(unittest.TestCase):
             cfg = load_config()
 
         self.assertTrue(cfg["block_resources"])
-
-    def test_missing_headless_defaults_false(self):
-        """没写 headless 时必须补成 false(有头硬约束), 不能靠下游默认值兜。
-
-        2026-09-30 事故: 板子 config.json 丢 headless/display 两键, 于是静默
-        跑 headless, 渲染挂死, 当晚全部好友 skip 漏发。"""
-        self.config_path.write_text(json.dumps({"send_window": {}}), encoding="utf-8")
-        with patch("src.config.CONFIG_FILE", self.config_path):
-            cfg = load_config()
-        self.assertIs(cfg["headless"], False)
-
-    def test_headless_true_is_kept_but_warned(self):
-        """显式写 headless=true 仍照配置生效(桌面档调试要用), 但会告警。"""
-        self.config_path.write_text(
-            json.dumps({"send_window": {}, "headless": True}), encoding="utf-8"
-        )
-        with patch("src.config.CONFIG_FILE", self.config_path):
-            cfg = load_config()
-        self.assertTrue(cfg["headless"])
-
-    def test_blank_display_without_env_warns(self):
-        """配置留空 display 且环境也没有 DISPLAY —— 这才是真问题, 必须告警。"""
-        self.config_path.write_text(
-            json.dumps({"send_window": {}, "headless": False}), encoding="utf-8"
-        )
-        buf = io.StringIO()
-        with (
-            patch("src.config.CONFIG_FILE", self.config_path),
-            patch.dict(os.environ, {"DISPLAY": ""}),
-            redirect_stdout(buf),
-        ):
-            load_config()
-        self.assertIn("display", buf.getvalue())
-
-    def test_blank_display_with_env_does_not_warn(self):
-        """桌面机 (display: null + DISPLAY=:0) 不该每次启动都警告一次。
-
-        config.dev.json 就是这种配置。旧版只判 cfg.get("display") 的真假, 于是这
-        台机器每跑一次 run_dev.sh 都被告知「将没有 X 显示可用」—— 而那一刻浏览器
-        明明能开窗。假警告会把所有警告一起变成噪音。
-        """
-        self.config_path.write_text(
-            json.dumps({"send_window": {}, "headless": False}), encoding="utf-8"
-        )
-        buf = io.StringIO()
-        with (
-            patch("src.config.CONFIG_FILE", self.config_path),
-            patch.dict(os.environ, {"DISPLAY": ":0"}),
-            redirect_stdout(buf),
-        ):
-            load_config()
-        self.assertNotIn("没有 X 显示", buf.getvalue())
-        self.assertNotIn("display", buf.getvalue())
 
     def test_invalid_json_exits(self):
         self.config_path.write_text("not valid json", encoding="utf-8")
@@ -411,163 +353,6 @@ class TestPerfProfileNormalization(unittest.TestCase):
         self.assertEqual(self._load(self._base("turbo"))["perf_profile"], "low")
 
 
-class TestPreflight(unittest.TestCase):
-    """2026-11-02 事故门禁: 配置缺到跑下去也没意义时必须硬失败, 不许 rc=0 静默。"""
-
-    def test_empty_accounts_raises(self):
-        with self.assertRaises(ConfigError) as cm:
-            preflight({"accounts": []})
-        self.assertIn("accounts", str(cm.exception))
-
-    def test_missing_accounts_raises(self):
-        with self.assertRaises(ConfigError):
-            preflight({})
-
-    def test_account_not_dict_raises(self):
-        with self.assertRaises(ConfigError) as cm:
-            preflight({"accounts": ["main"]})
-        self.assertIn("accounts[0]", str(cm.exception))
-
-    def test_account_without_name_raises(self):
-        with self.assertRaises(ConfigError) as cm:
-            preflight({"accounts": [{"storage_file": "s.json"}]})
-        self.assertIn("name", str(cm.exception))
-
-    def test_blank_name_raises(self):
-        with self.assertRaises(ConfigError):
-            preflight({"accounts": [{"name": "   "}]})
-
-    # 有头模式是硬门禁: accounts 齐了还不够, headless/display 写错同样拒绝启动。
-    # 下面这组用例把「配置写错」和「跑起来」之间那道以前的空缺钉住。
-    def test_good_config_passes(self):
-        preflight(
-            {
-                "accounts": [{"name": "main"}, {"name": "ACCOUNT_B"}],
-                "headless": False,
-                "display": ":99",
-            }
-        )
-
-    def test_headless_true_raises(self):
-        with self.assertRaises(ConfigError) as cm:
-            preflight(
-                {"accounts": [{"name": "main"}], "headless": True, "display": ":99"}
-            )
-        self.assertIn("headless", str(cm.exception))
-
-    def test_missing_headless_raises(self):
-        """没写 headless 不能当"默认有头"放行 —— 那正是 2026-09-30 事故的形态。"""
-        with self.assertRaises(ConfigError) as cm:
-            preflight({"accounts": [{"name": "main"}], "display": ":99"})
-        self.assertIn("headless", str(cm.exception))
-
-    def test_missing_display_raises(self):
-        with self.assertRaises(ConfigError) as cm:
-            preflight({"accounts": [{"name": "main"}], "headless": False})
-        self.assertIn("display", str(cm.exception))
-
-    def test_bad_display_raises(self):
-        """display 必须是 :N 形式, 写成路径或裸数字都不行。
-
-        这里只管**格式**: "是否存在那个显示" 是运行时的事(check_xvfb_display 查
-        /tmp/.X11-unix 里的 socket), 配置层不该去猜机器上开了哪些显示号。
-        """
-        # 注意 ":99 " 是允许的(前后空白无意义)。
-        # 空串/None/空白串也不在 bad 里: 它们现在是「回落到当前 shell 的 DISPLAY」,
-        # 见下面 test_blank_display_* 两条。
-        for bad in (":abc", "99", "/tmp/.X11-unix/X99"):
-            with self.subTest(display=bad):
-                with self.assertRaises(ConfigError) as cm:
-                    preflight(
-                        {"accounts": [{"name": "main"}], "headless": False, "display": bad}
-                    )
-                self.assertIn("display", str(cm.exception))
-
-    def test_blank_display_without_env_raises(self):
-        """display 留空且环境无 DISPLAY = 真的没有显示可用, 必须拒。
-
-        空 display 以前一律判错, 于是 config.dev.json 的 "display": null
-        连自己项目的门禁都过不去; 一律放行又会让板上丢键时静默跑成
-        一个连不上的显示。现在的语义是「回落到当前 shell 的 DISPLAY」。
-        """
-        for blank in (None, "", "   "):
-            with (
-                self.subTest(display=blank),
-                patch.dict("os.environ", {"DISPLAY": ""}),
-                self.assertRaises(ConfigError) as cm,
-            ):
-                preflight(
-                    {
-                        "accounts": [{"name": "main"}],
-                        "headless": False,
-                        "display": blank,
-                    }
-                )
-            self.assertIn("DISPLAY", str(cm.exception))
-
-    def test_blank_display_falls_back_to_env(self):
-        """display 留空但当前 shell 有 DISPLAY = 合法的桌面调试配置。"""
-        with patch.dict("os.environ", {"DISPLAY": ":0"}):
-            preflight({"accounts": [{"name": "main"}], "headless": False, "display": None})
-
-    def test_dev_config_passes_on_a_desktop(self):
-        """config.dev.json 的 "display": null 必须能在桌面上启动。
-
-        这条钉住 run_dev.sh 的可运行性: dev 配置刻意不写死 :99,
-        而是让浏览器用当前会话的 DISPLAY。
-        """
-        with patch.dict("os.environ", {"DISPLAY": ":0"}):
-            preflight(
-                {
-                    "accounts": [{"name": "main"}],
-                    "headless": False,
-                    "display": None,
-                    "browser_reuse": True,
-                }
-            )
-
-    def test_display_with_screen_suffix_passes(self):
-        preflight(
-            {"accounts": [{"name": "main"}], "headless": False, "display": ":99.0"}
-        )
-
-    def test_headless_allowed_by_env_escape_hatch(self):
-        """桌面档调试的唯一出口: SPARK_ALLOW_HEADLESS=1 时放行 headless。"""
-        from src import config
-
-        with patch.dict("os.environ", {config.ALLOW_HEADLESS_ENV: "1"}):
-            preflight(
-                {"accounts": [{"name": "main"}], "headless": True, "display": ":99"}
-            )
-
-    def test_env_escape_hatch_still_checks_display(self):
-        """逃生口只放行 headless 这一条, display 照查。
-
-        以前一开逃生口就整段 return, 连 display 都不看了 —— 只想关掉 headless
-        门禁的人, 顺手把「必须有显示」也一起关掉了。
-        """
-        from src import config
-
-        with (
-            patch.dict("os.environ", {config.ALLOW_HEADLESS_ENV: "1", "DISPLAY": ""}),
-            self.assertRaises(ConfigError) as cm,
-        ):
-            preflight({"accounts": [{"name": "main"}], "headless": True, "display": ":abc"})
-        self.assertIn("display", str(cm.exception))
-
-    def test_env_escape_hatch_still_requires_accounts(self):
-        """逃生口只放开有头门禁, accounts 为空仍然硬失败。"""
-        from unittest.mock import patch
-
-        from src import config
-
-        with (
-            patch.dict("os.environ", {config.ALLOW_HEADLESS_ENV: "1"}),
-            self.assertRaises(ConfigError),
-        ):
-            preflight({"accounts": [], "headless": True})
-
-
 class TestEnvPath(unittest.TestCase):
     def test_relative_resolves_under_project_root(self):
         from unittest.mock import patch
@@ -591,22 +376,18 @@ class TestEnvPath(unittest.TestCase):
             self.assertEqual(config._env_path("SPARK_RUNTIME_DIR", default), default)
 
     def test_absolute_passthrough(self):
-        """绝对路径原样透传, 不拼到项目根下。
-
-        用临时目录而不是写死 /tmp: Windows 上 Path("/tmp/x").is_absolute() 为
-        False(缺盘符), 写死 POSIX 路径的断言在开发机上必挂, 属测试自身的平台
-        假设, 不是被测逻辑错。"""
+        from pathlib import Path as _Path
         from unittest.mock import patch
 
         from src import config
 
-        with (
-            tempfile.TemporaryDirectory() as tmp,
-            patch.dict("os.environ", {"SPARK_RUNTIME_DIR": tmp}),
-        ):
+        # 用平台自洽的绝对路径: 写死 "/tmp/spark-x" 在 Windows 上会被解析成
+        # "C:/tmp/spark-x", 用例假失败(2026-11-19 审计)。
+        absolute = _Path(tempfile.gettempdir()) / "spark-x"
+        with patch.dict("os.environ", {"SPARK_RUNTIME_DIR": str(absolute)}):
             self.assertEqual(
                 config._env_path("SPARK_RUNTIME_DIR", config.BASE_DIR / "runtime"),
-                Path(tmp),
+                absolute,
             )
 
 

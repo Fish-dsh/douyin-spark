@@ -11,12 +11,8 @@ from src import vision_cv
 from src.sender import (
     _JS_CLEAR_BOX,
     _JS_INJECT_AND_SEND,
-    _JS_LAST_BUBBLE_SELF,
-    _JS_MSG_TAIL,
     _JS_READ_BOX_TEXT,
-    SEND_BTN_SYNTH_SELECTORS,
     SEND_BUTTON_SELECTORS,
-    _click_coords,
     click_friend,
     confirm_send,
     cv_send_fallback,
@@ -25,42 +21,12 @@ from src.sender import (
     press_enter,
     send_message,
     send_sticker,
-    synthetic_click,
-    synthetic_click_at,
     synthetic_click_row,
     try_send_button_or_enter,
     verify_chat_opened,
     verify_chat_opened_ready,
     xpath_text_literal,
 )
-
-
-class TestTailEvidenceReadsTheRightRow(unittest.TestCase):
-    """板端 2026-11-19 实测的两条口径: 只认精确一级气泡类名, 且索引 0 = 最新一条。
-
-    这两条都属于「证据读错了」而不是「证据读不到」—— 读错比读不到更危险:
-    _evidence() 会把虚高的数量和错误的尾部当成硬证据, 于是确认链一路判成功。
-    """
-
-    def test_strict_selector_is_used_first(self):
-        for js in (_JS_MSG_TAIL, _JS_LAST_BUBBLE_SELF):
-            self.assertIn("messageMessageBoxmessageBox", js)
-            self.assertIn("const STRICT", js)
-            # 宽泛类名会把 contentBox/rowBox 也数成气泡, 不该再出现在候选里
-            self.assertNotIn('"[class*="MessageBox"]', js)
-            self.assertNotIn('"[class*="bubble"]', js)
-
-    def test_latest_row_is_index_zero(self):
-        # 旧版取 boxes[boxes.length - 1] 拿到的是最早那条(多为时间分隔/空行)
-        self.assertIn("textOf(boxes[0])", _JS_MSG_TAIL)
-        self.assertIn("textOf(boxes[1])", _JS_MSG_TAIL)
-        self.assertNotIn("boxes[boxes.length - 1]", _JS_MSG_TAIL)
-        self.assertIn("const box = boxes[0]", _JS_LAST_BUBBLE_SELF)
-
-    def test_zero_height_placeholders_are_dropped(self):
-        # 虚拟滚动会留下 height=0 的占位行, 数进去气泡数就虚高了
-        for js in (_JS_MSG_TAIL, _JS_LAST_BUBBLE_SELF):
-            self.assertIn("getBoundingClientRect().height > 1", js)
 
 
 class TestXpathTextLiteral(unittest.TestCase):
@@ -196,14 +162,6 @@ def _js_fake(
             return rest.pop(0) if rest else _tail(0)
         if ".test(m)" in js:  # JS_FIND_EMOJI_BTN
             return emoji_btn
-        if "(sel) =>" in js:  # _JS_SYNTH_CLICK_SEL: 表情键的开面板点击
-            return emoji_btn
-        if "([x, y]) =>" in js:  # _JS_SYNTH_CLICK_AT: 坐标兜底, 恒成功
-            return True
-        if "const target = hit" in js:  # _JS_CLICK_STICKER: 就地派发
-            if not isinstance(sticker, dict) or "error" in sticker:
-                return sticker
-            return {"ok": True, "tag": "DIV", **sticker}
         if "sticker_not_found" in js:  # JS_FIND_STICKER
             return sticker
         if ">= 8) return true" in js:  # JS_PANEL_VISIBLE
@@ -358,8 +316,10 @@ class TestSendSticker(unittest.TestCase):
         self.assertEqual(method, "未找到表情按钮")
 
     def test_panel_not_opened(self):
-        # 面板开合由 JS_PANEL_VISIBLE 复核: 点完表情键它仍报 false → 判未打开。
-        self.page.evaluate.side_effect = _js_fake([], panel_visible=False)
+        # First call: find emoji button, next 12: panel visible check (range(12))
+        self.page.evaluate.side_effect = [
+            {"x": 100, "y": 200},  # emoji button
+        ] + [False] * 12  # panel visible check x12 (放宽后的等待窗口)
 
         sent, method = send_sticker(self.page, "续火花")
 
@@ -384,9 +344,22 @@ class TestSendSticker(unittest.TestCase):
         self.assertEqual(method, "表情面板内容未加载")
 
     def test_sticker_not_found_in_panel(self):
-        self.page.evaluate.side_effect = _js_fake(
-            [_tail(0)], sticker={"error": "sticker_not_found"}
-        )
+        # Actual call sequence:
+        # 1. evaluate(JS_FIND_EMOJI_BTN) -> {"x": 100, "y": 200}
+        # 2. evaluate(JS_PANEL_VISIBLE) -> True (breaks loop after 1)
+        # 3. wait_for_selector (not evaluate)
+        # 4. evaluate(JS_FIND_STICKER, name) -> {"error": "sticker_not_found"}
+        # Then loop 6 times: read_tail(_JS_MSG_TAIL) + evaluate(JS_PANEL_CLOSED)
+        # (本例在 find sticker 处就返回, 后续值不会被消费, 留着只为暴露序列)
+        self.page.evaluate.side_effect = (
+            [
+                {"x": 100, "y": 200},  # emoji button
+                True,  # panel visible (breaks after 1)
+                {"error": "sticker_not_found"},  # find sticker
+            ]
+            + [""] * 6
+            + [False] * 6
+        )  # last_msg x6, panel_closed x6
 
         sent, method = send_sticker(self.page, "续火花")
 
@@ -673,12 +646,15 @@ class TestCvSendFallback(unittest.TestCase):
         self.assertIn("cv2", detail)
         self.page.mouse.click.assert_not_called()
 
-    @unittest.skipUnless(vision_cv.available(), "需要 opencv")
     def test_no_editable_aborts(self):
         self.page.evaluate.return_value = None
         ok, detail = cv_send_fallback(self.page, "续火花", "测试好友")
         self.assertFalse(ok)
         self.assertIn("输入框", detail)
+
+
+if __name__ == "__main__":
+    unittest.main()
 
 
 class TestGeometrySendButton(unittest.TestCase):
@@ -734,95 +710,18 @@ class TestStickerOcclusion(unittest.TestCase):
     def test_occluded_item_is_not_clicked(self):
         """目标表情被别的层盖住时不许瞎点: 直接失败交给文字层, 别浪费 6s 等面板。"""
         page = MagicMock()
-        page.evaluate.side_effect = _js_fake(
-            [_tail(0)],
-            sticker={
+        page.evaluate.side_effect = [
+            {"x": 708, "y": 562},  # emoji button
+            True,  # panel visible
+            {
                 "error": "sticker_occluded",
                 "at": {"x": 476, "y": 335, "tag": "DIV", "cls": "chatList"},
             },
-        )
+        ]
         sent, method = send_sticker(page, "续火花")
         self.assertFalse(sent)
         self.assertIn("遮挡", method)
-        # 遮挡判定发生在派发之前, 任何一路点击都不该发生。
-        page.mouse.click.assert_not_called()
-
-
-class TestSyntheticClick(unittest.TestCase):
-    """2026-11-02 板端实测: 无窗口管理器的 Xvfb 上 Playwright 的 mouse/keyboard
-    全部无效, 只有 JS 合成的指针序列能触发 React。所以合成点击是发送链的第 0
-    顺位, 但**同样要过「输入框是否清空」那一关**, 不许把「派发成功」当成功。"""
-
-    def test_click_coords_accepts_numbers(self):
-        self.assertEqual(_click_coords({"x": 1, "y": 2.5}), {"x": 1, "y": 2.5})
-
-    def test_click_coords_rejects_non_dict(self):
-        for bad in (None, True, "1,2", [1, 2], 0):
-            self.assertIsNone(_click_coords(bad), bad)
-
-    def test_click_coords_rejects_non_numeric(self):
-        self.assertIsNone(_click_coords({"x": "1", "y": 2}))
-        self.assertIsNone(_click_coords({"x": 1}))
-        self.assertIsNone(_click_coords({"x": True, "y": 2}))
-
-    def test_synthetic_click_returns_none_on_null(self):
-        page = MagicMock()
-        page.evaluate.return_value = None
-        self.assertIsNone(synthetic_click(page, "svg[class*='publishBtn']"))
-
-    def test_synthetic_click_returns_none_on_exception(self):
-        page = MagicMock()
-        page.evaluate.side_effect = Exception("boom")
-        self.assertIsNone(synthetic_click(page, "svg[class*='publishBtn']"))
-
-    def test_synthetic_click_at_false_on_exception(self):
-        page = MagicMock()
-        page.evaluate.side_effect = Exception("boom")
-        self.assertFalse(synthetic_click_at(page, 10, 20))
-
-    def test_synth_send_selectors_are_class_based_only(self):
-        """合成点击按元素中心派发, 选择器越宽越容易点到别的东西 -> 只留类名类。"""
-        for sel in SEND_BTN_SYNTH_SELECTORS:
-            self.assertIn("class*=", sel)
-            self.assertNotIn("has-text", sel)
-
-    def test_send_button_synth_tried_first(self):
-        page = MagicMock()
-        seen: list = []
-
-        def fake(js, *args):
-            seen.append((js, args))
-            if "(sel) =>" in js:  # 合成点击: 只对第一条候选命中
-                return {"x": 755, "y": 561} if args[0] == SEND_BTN_SYNTH_SELECTORS[0] else None
-            if "cleaned" in js:  # _JS_BOX_EMPTY
-                return True
-            raise AssertionError(f"未预期 JS: {js[:60]}")
-
-        page.evaluate.side_effect = fake
-        desc = try_send_button_or_enter(page)
-        self.assertIn("合成", desc)
-        # 合成点击先于任何 locator 点击, 也先于鼠标几何点击。
-        page.locator.assert_not_called()
-        page.mouse.click.assert_not_called()
-
-    def test_synth_click_that_did_not_send_falls_through(self):
-        """合成点击没清空输入框 = 没发出去, 必须继续往下走, 不许直接报成功。"""
-        page = MagicMock()
-        page.locator.return_value.first.wait_for.side_effect = Exception("nope")
-
-        def fake(js, *args):
-            if "(sel) =>" in js:
-                return {"x": 755, "y": 561}
-            if "cleaned" in js:
-                return False
-            if "cands" in js:
-                return {"cands": []}
-            raise AssertionError(f"未预期 JS: {js[:60]}")
-
-        page.evaluate.side_effect = fake
-        desc = try_send_button_or_enter(page)
-        self.assertIn("Enter", desc)
-        page.keyboard.press.assert_called_with("Enter")
+        page.mouse.click.assert_called_once_with(708, 562)
 
 
 class TestSendButtonSelectors(unittest.TestCase):
@@ -843,7 +742,7 @@ class TestSendButtonSelectors(unittest.TestCase):
 
 
 class TestLastBubbleIsSelf(unittest.TestCase):
-    """2026-11-01: 表情层判据「最后一条文本含表情名」分不清是谁发的 ——
+    """2026-11-01 会话50: 表情层判据「最后一条文本含表情名」分不清是谁发的 ——
     续火花是双方互发同一个表情, 好友回一个同款也会命中。这里只测旁证函数本身,
     判定逻辑不变(今晚不改发送行为)。
     """
@@ -917,7 +816,9 @@ class TestInputAssertion(unittest.TestCase):
     def _send(self, page, text="续火花"):
         with (
             patch("src.sender.find", return_value=self.box),
-            patch("src.sender.try_send_button_or_enter", return_value="几何(1,2 SPAN)") as m,
+            patch(
+                "src.sender.try_send_button_or_enter", return_value="几何(1,2 SPAN)"
+            ) as m,
         ):
             sent, method = send_message(page, text)
         return sent, method, m
@@ -1074,7 +975,3 @@ class TestInputAssertion(unittest.TestCase):
 
         self.assertTrue(sent, method)
         self.assertIn("策略A", method)
-
-
-if __name__ == "__main__":
-    unittest.main()
