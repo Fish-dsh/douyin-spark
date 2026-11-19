@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import gzip
+import io
 import tempfile
 import unittest
 from datetime import date, datetime, timedelta
@@ -253,6 +254,38 @@ class TestRun(unittest.TestCase):
         self.assertIn("这 7 晚", written)
         self.assertIn("完全没有日志", written)
         self.assertNotIn("更早的夜晚没有记录", written)
+
+
+class TestEmit(unittest.TestCase):
+    """周报打印必须扛得住装不下的终端编码。
+
+    Windows 控制台默认 GBK, ✅/⚠️ 会抛 UnicodeEncodeError 把整条命令打断
+    (照 docs/development.md 跑 unittest discover 会因此冒出 3 个 ERROR)。
+    周报是只读巡检产物, 少几个符号也比整条失败好。
+    """
+
+    def test_gbk_stdout_does_not_raise(self):
+        buf = io.TextIOWrapper(io.BytesIO(), encoding="gbk", errors="strict")
+        real = weekly_report.sys.stdout
+        weekly_report.sys.stdout = buf
+        try:
+            weekly_report._emit("✅ 全部正常 ⚠️ 需要注意")
+            buf.flush()
+            out = buf.buffer.getvalue().decode("gbk")
+        finally:
+            weekly_report.sys.stdout = real
+        self.assertIn("全部正常", out)
+        self.assertIn("需要注意", out)
+
+    def test_utf8_stdout_keeps_symbols(self):
+        buf = io.StringIO()
+        real = weekly_report.sys.stdout
+        weekly_report.sys.stdout = buf
+        try:
+            weekly_report._emit("✅ 全部正常")
+        finally:
+            weekly_report.sys.stdout = real
+        self.assertIn("✅", buf.getvalue())
 
 
 if __name__ == "__main__":

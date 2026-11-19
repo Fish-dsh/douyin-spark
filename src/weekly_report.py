@@ -491,13 +491,31 @@ def run(days_back: int = 7) -> int:
     health = collect_health(now)
     report = build_report(today, eff_start, end, days, note, health=health, now=now)
 
-    print(report)
+    _emit(report)
     try:
         REPORT_FILE.parent.mkdir(parents=True, exist_ok=True)
         REPORT_FILE.write_text(report + "\n", encoding="utf-8")
     except OSError as exc:
         print(f"[weekly] 周报落盘失败(忽略): {exc}", file=sys.stderr)
     return 0
+
+
+def _emit(text: str) -> None:
+    """把周报写到 stdout, 遇到终端编码装不下的字符降级为 ? 而不是崩掉。
+
+    Linux 生产是 UTF-8, 从来不会走到 except。开发机 Windows 控制台默认 GBK,
+    ✅/⚠️ 这类符号会抛 UnicodeEncodeError 直接打断整条周报命令(实测照
+    docs/development.md 跑 unittest discover 会因此冒出 3 个 ERROR, 与被测
+    逻辑无关)。周报是只读的巡检产物, 少几个符号也比整条命令失败好。
+    """
+    enc = (sys.stdout.encoding or "utf-8").lower()
+    try:
+        # 先编码探一次, 别让 print 半路抛: TextIOWrapper 出错前可能已写出前半段,
+        # 那样终端上会出现半截周报。
+        text.encode(enc)
+    except (UnicodeEncodeError, LookupError):
+        text = text.encode(enc, errors="replace").decode(enc, "replace")
+    print(text)
 
 
 def main() -> int:
