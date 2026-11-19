@@ -6,7 +6,7 @@
 
 > **免责声明**：本项目为个人自动化实践，与抖音官方无关。自动化操作可能触发平台风控，请自行评估风险并遵守平台协议；由此产生的任何后果由使用者自负。
 
-`Python 3.9+` · `Playwright (Chromium)` · `MIT` · `586 单元测试`
+`Python 3.9+` · `Playwright (Chromium)` · `MIT` · `591 单元测试`
 
 ---
 
@@ -33,7 +33,7 @@ python3 -m venv .venv
 cp config.example.json config.json             # 好友名单无需配置，扫描自动发现
 cp .env.example .env && chmod 600 .env         # 只有用密码登录才需要填；见下方说明
 
-# 生成登录态（二选一）
+# 生成登录态（二选一）——先确认这台机器有 X 显示能弹浏览器，见下面第一条
 .venv/bin/python login.py --manual             # 弹出浏览器，人工扫码/登录后保存
 .venv/bin/python login.py --password           # 用 .env 里的账号密码登录
 
@@ -46,7 +46,16 @@ cp .env.example .env && chmod 600 .env         # 只有用密码登录才需要�
 - **浏览器必须是"有头"模式**（`headless: false` + Xvfb `:99`），否则抖音会拦、弱机还会渲染挂死。这条不是文档里的建议，而是**启动硬门禁**：`config.json` 里缺 `headless`、写成 `true`、或者 `display` 不是 `:N` 形式，`spark.py` 一律以退出码 5 拒绝启动（桌面临时调试要跑 headless 时设 `SPARK_ALLOW_HEADLESS=1`）。部署前先看 [部署文档](docs/deployment.md)。
 - **`.env` 不是必需的**：只有走 `login.py --password`（密码登录）才要往里填账号密码。用 `--manual` 扫码登录的话，`.env` 留空就行。**`.env` / `config.json` / `runtime/` 都不要提交**，已经在 `.gitignore` 里。
 - **登录态在 `runtime/storage.json`**。它单独传、别进仓库 —— 把它跟代码一起同步过去这件事做漏了，部署机会去扫码登录而无人值守下没人做，当晚就是静默零发送。细节见部署文档「三类东西分开走」。
-- **没有屏幕的 VPS 上 `--manual` 起不来**（没地方弹浏览器），要么本机登好再传 `storage.json`，要么临时装 Xvfb 用 `ssh -X` 转发窗口。
+- **登录用的是你这台机器当前的 X 显示，跟 `config.json` 的 `display` 没关系**。那条 `:99` 只给 `spark.py` 用（`src/session.py` 把它注入 `DISPLAY`）；`login.py` 读的是当前 shell 的 `DISPLAY`。所以登录前先确认：
+  - **有桌面的机器**：直接在桌面会话里跑，`echo $DISPLAY` 应该输出 `:0` 之类。**不要加 `sudo`** —— sudo 会把 `DISPLAY` 丢掉，现象和「没装 X」一模一样。
+  - **没有桌面的机器**（服务器 / VPS / 板子）：先起一个虚拟显示，再把它指给登录命令：
+    ```bash
+    sudo apt install -y xvfb
+    Xvfb :99 -screen 0 800x600x24 &                # 部署机上它是 xvfb.service 常驻的
+    .venv/bin/python login.py --manual --display :99
+    ```
+    想在自己电脑上看这个窗口，再加 `ssh -X` 转发。
+  - 两者都没有（`DISPLAY` 为空）时 `login.py` 会直接停手并打印上面这两条路，不会抛 Playwright 的 `Missing X server or $DISPLAY` 栈。
 
 ## 常用命令
 

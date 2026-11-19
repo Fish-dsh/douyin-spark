@@ -28,6 +28,14 @@ if [ ! -f config.json ]; then
     echo "      .venv/bin/python login.py --manual 生成。" >&2
 fi
 
+# config.dev.json 把 display 置成 null, 于是浏览器直接用当前 shell 的 DISPLAY ——
+# 这正是「在桌面机上开发」想要的。WSL/纯 SSH 里它往往是空的, 那时候浏览器起不来,
+# 与其让 Playwright 抛 Missing X server, 不如在这里说清楚。
+if [ -z "${DISPLAY:-}" ]; then
+    echo "提示: 当前没有 DISPLAY, 有头浏览器打不开。桌面机请在有桌面的会话里跑;" >&2
+    echo "      WSL 可用 WSLg(通常自动带 DISPLAY), 纯 SSH 先起 Xvfb 再 DISPLAY=:99 ./run_dev.sh。" >&2
+fi
+
 export SPARK_CONFIG="${SPARK_CONFIG:-config.dev.json}"
 export SPARK_RUNTIME_DIR="${SPARK_RUNTIME_DIR:-runtime-dev}"
 exec .venv/bin/python spark.py "$@"

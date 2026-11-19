@@ -99,7 +99,7 @@ cron 建议（部署机，晚于 00:00 主任务）：
 - **月度回看**：`python tools/strat_stats.py --all --days 30` 一次读尽 `runtime/spark.log*`（含 `.gz`）；只读默认入口时它只看当前那份，历史轮转不会被统计。
 - **手动强制发送**：`python spark.py --force` 忽略发送窗口与今日幂等限制，立即尝试给所有需续好友发送（用于补发或测试）。
 - **发送链路验证**：`python spark.py --verify-send` 窗口内对**全部待续好友**（含置顶强制续）逐一真实发送并确认（会写 `state.json` 防重发，通过要求日志有「发送成功」正向证据）。
-- **重新登录**：登录态彻底失效时，重跑 `python login.py --password`（读 `login.py --password` 这条人工入口的 `.env`；无人值守路径的密码在 `config.json` 的 `accounts` 里），或 `python login.py --manual` 人工扫码。
+- **重新登录**：登录态彻底失效时，重跑 `python login.py --password`（读 `login.py --password` 这条人工入口的 `.env`；无人值守路径的密码在 `config.json` 的 `accounts` 里），或 `python login.py --manual` 人工扫码。两者都用**当前 shell 的 `DISPLAY`**（不是 `config.json` 的 `display`）；部署机上 `:99` 由 `xvfb.service` 常驻着，所以那里写 `DISPLAY=:99 python login.py --manual`，或者直接 `login.py --manual --display :99`。
 
 ## 开发与自检
 

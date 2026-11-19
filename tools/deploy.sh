@@ -117,7 +117,14 @@ scp -q "$NEW_TGZ" "$HOST:$NEW_TGZ"
 # 解包后必须收拾权限: 从 Windows 挂载盘(WSL /mnt/c)或某些 tar 打包出来的成员带着
 # 0777, 于是 src/ tests/ 下每个 .py 都变成可执行 —— 板端 ruff 会刷出一整屏
 # EXE002 The file is executable but no shebang is present, 真正的 lint 错误被淹掉。
-# 这里统一: 所有 .py 去掉 x 位, 入口脚本与 tools/ 里的 shell/node 脚本保留 x 位。
+#
+# 规则是「按位置决定」, 不是「保留 git 里的原样」(tar 出来的 mode 本来就不可信):
+#   1. 全仓 .py 先统一去掉 x 位(src/ tests/ 里那些都是被 import 的, 不该可执行);
+#   2. 再给两个入口 shell 脚本加回 x 位;
+#   3. tools/ 下的 .sh 与 .py 一律赋 x 位 —— 它们都是 #!/usr/bin/env ... 开头的
+#      可执行工具。注意 git 索引里 tools/check_js.py 等是 100644(不是 100755),
+#      但都有 shebang, 所以这里赋 x 不会触发 EXE002; 反过来说, 谁新加一个 tools/
+#      下的 .py 却不写 shebang, 部署后就会在 lint 里冒出来。
 # 注意整段是 `set -euo pipefail` 的一条链, 任何一步失败都会让 ssh 返回非 0 从而回滚;
 # 千万不要再用 `;` 把 chmod 和 tar 拆成互不相关的独立命令。
 ssh "$HOST" "REMOTE_DIR='$REMOTE_DIR' REMOTE_USER='$REMOTE_USER' \

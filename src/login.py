@@ -699,11 +699,46 @@ def manual_login(
     return False
 
 
+def _prepare_display(explicit: str | None, needs_display: bool) -> bool:
+    """确认真的有 X 显示可用; 返回 False 表示这次登录必须中止。
+
+    为什么要在启动浏览器之前单独查一次 —— 这句检查是给第一次装的人看的:
+      - config.json 里的 display 只服务 spark.py(src/session.py 会把它注入
+        DISPLAY), 人工登录走的是**当前 shell 的 DISPLAY**, 两者不是一回事。
+        照着 config.example.json 抄了 ":99" 却没装 Xvfb 的人, 直接跑 --manual
+        只会拿到 Playwright 的 "Missing X server or $DISPLAY" 栈, 看不出要做什么。
+      - 用 sudo 跑会丢掉 DISPLAY, 表现和"没装 X"一模一样, 所以要一起提。
+    """
+    if not needs_display:
+        _log("[cli] 无头登录, 不需要 X 显示")
+        return True
+    if explicit:
+        os.environ["DISPLAY"] = explicit
+        _log(f"[cli] 按命令行参数使用 DISPLAY={explicit}")
+        return True
+    current = (os.environ.get("DISPLAY") or "").strip()
+    if current:
+        _log(f"[cli] 使用当前环境 DISPLAY={current}")
+        return True
+    _log(
+        "[cli] 当前环境没有 DISPLAY, 有头浏览器打不开。两条路, 按机器情况选:\n"
+        "  1) 这台机器有桌面: 在桌面会话里直接跑(不要加 sudo, sudo 会丢掉 DISPLAY),"
+        " 或者 DISPLAY=:0 .venv/bin/python login.py --manual\n"
+        "  2) 这台机器没有桌面(服务器/VPS/板子): 先起一个虚拟显示再指定它 ——\n"
+        "     sudo apt install -y xvfb && Xvfb :99 -screen 0 800x600x24 &\n"
+        "     .venv/bin/python login.py --manual --display :99\n"
+        "  注意 config.json 里的 display 只管 spark.py, 人工登录不读它。"
+    )
+    return False
+
+
 def main() -> None:
     """CLI 入口.
 
-    python login.py --password [--storage file]  用 .env 中的账号密码登录(自动重登入口)
-    python login.py --manual [--storage file]    有头浏览器人工登录(短信验证码等), 成功后存登录态
+    python login.py --password [--storage file] [--display :N]  用 .env 中的账号密码登录(自动重登入口)
+    python login.py --manual   [--storage file] [--display :N]  有头浏览器人工登录(短信验证码等), 成功后存登录态
+
+    --display 只影响本次进程的 DISPLAY 环境变量; 不传就用当前 shell 已有的那个。
     """
     args = sys.argv[1:]
     storage_path = None
@@ -713,7 +748,21 @@ def main() -> None:
             storage_path = args[idx + 1]
             args = [a for i, a in enumerate(args) if i not in (idx, idx + 1)]
 
+    display = None
+    if "--display" in args:
+        idx = args.index("--display")
+        if idx + 1 < len(args):
+            display = args[idx + 1]
+            args = [a for i, a in enumerate(args) if i not in (idx, idx + 1)]
+        else:
+            _log("[cli] --display 后面要跟显示号, 例如 --display :99")
+            sys.exit(2)
+
     headless = "--headless" in args
+    # --manual 的浏览器恒定有头(src 里写死 headless=False), 所以 --headless 对它无效。
+    needs_display = ("--manual" in args) or not headless
+    if not _prepare_display(display, needs_display):
+        sys.exit(1)
 
     if "--manual" in args:
         with sync_playwright() as p:

@@ -15,7 +15,7 @@
 
 ## 方式 A：本地登录一次 → 只把登录态传过去
 
-1. **本机**（有屏幕的那台）把账号密码填入 `.env`（`cp .env.example .env && chmod 600 .env`，格式见文件内注释），跑 `python login.py --password`（有头会话）生成 `runtime/storage.json`。
+1. **本机**（有屏幕的那台）把账号密码填入 `.env`（`cp .env.example .env && chmod 600 .env`，格式见文件内注释），跑 `python login.py --password`（有头会话）生成 `runtime/storage.json`。这里的「有头」用的是**当前 shell 的 `DISPLAY`**，不是 `config.json` 里的 `display`：桌面机器上它通常是 `:0`，别按配置抄 `:99`；也不要用 `sudo` 跑（sudo 会丢掉 `DISPLAY`）。
 2. **代码**同步到部署机（`REMOTE` 换成你自己的 `user@host`）：
    ```bash
    git bundle create /tmp/spark-mirror.bundle --all && scp /tmp/spark-mirror.bundle REMOTE:/tmp/
@@ -33,7 +33,7 @@
 4. **账号密码**在部署机的 `config.json` 里自己填（`accounts[].account/password`，`chmod 600 config.json`）。别把本机的 `config.json` scp 过去 —— 那样两台机器密码各改一次就漂了，而失效的那台只会在巡检时才暴露。
 5. 传完**先验证一次**再挂 cron：`ssh REMOTE 'cd /opt/douyin-spark && .venv/bin/python spark.py --dry-run'`，日志里该出现 `[login] 复用已保存登录态`，而不是跳登录页。
 
-> 无桌面 VPS 上 `login.py --manual` 起不来（没有 X 显示，浏览器窗口无处可去）。两条路：一是在本机/笔记本上登录一次，按上面第 3 步把 `storage.json` 传过去；二是在 VPS 上装 Xvfb 后跑 `login.py --manual`，用 `ssh -X` 把窗口转发到你本地屏幕扫码。
+> 无桌面 VPS 上 `login.py --manual` 默认起不来（没有 X 显示，浏览器窗口无处可去）——`login.py` 会发现 `DISPLAY` 为空、打印两条路再退出，不会甩你一脸 Playwright 栈。两条路：一是在本机/笔记本上登录一次，按上面第 3 步把 `storage.json` 传过去（**推荐**）；二是在 VPS 上装 Xvfb 后跑 `Xvfb :99 -screen 0 800x600x24 &` 再 `login.py --manual --display :99`，想在本机看到窗口就同时用 `ssh -X` 转发。`--display` 只影响这次登录进程，不写进任何配置。
 
 账号需重新登录时，见 `docs/operations.md`「登录管理」。
 

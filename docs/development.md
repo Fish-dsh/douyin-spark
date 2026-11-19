@@ -6,7 +6,10 @@
 python3 -m venv .venv
 .venv/bin/pip install -r requirements-dev.txt   # 开发环境: 运行时 + ruff + pytest
 .venv/bin/playwright install chromium
+sudo apt install -y nodejs                      # 可选, 但完整自检需要它(见下)
 ```
+
+> **Node 只在开发机需要，生产不需要。** `tools/check_js.py` 靠 `node --check` 检查写在 Python 三引号里的 JS 常量，没装 node 时 `tools/verify.sh` 会**跳过**这一步并以**退出码 2** 收尾 —— 2 是「没验证到」，不是「通过」。所以：只想把程序跑起来的话不用装 node；想跑完整自检（提 PR 前）就得装。各平台装法：Debian/Ubuntu `sudo apt install -y nodejs`，macOS `brew install node`，Windows 装官方 LTS 包或 `winget install OpenJS.NodeJS.LTS`（Windows 上跑这套 shell 脚本还得先进 WSL）。
 
 依赖分成三份，按「跑起来到底需要什么」切，不是按喜好切：
 
@@ -31,7 +34,7 @@ make verify                 # 等价，装了 make 就能用
 PY=/usr/bin/python3.11 ./tools/verify.sh   # 换一个解释器交叉验证
 ```
 
-退出码分三种：`0` 全过；`1` 有检查真失败；`2` **没有失败但有步骤被跳过**（干净机器上没装 ruff 或 node / 用了 `--fast` 就属于这类）。`2` 不是绿 —— 它表示「没验证到」，别在脚本里把它当通过。
+退出码分三种：`0` 全过；`1` 有检查真失败；`2` **没有失败但有步骤被跳过**（干净机器上没装 ruff 或 node 就属于这类）。`2` 不是绿 —— 它表示「没验证到」，别在脚本里把它当通过。`--fast` 主动跳过单测**不算**跳过检查（那是使用者按需裁剪），所以装了 ruff + node 的机器上 `--fast` 会返回 `0`。
 
 第 2 步 `tools/check_js.py` 值得单独说一句：`src/` 里大量 JS 是写在 Python 三引号里的字符串，语法错只有在浏览器里 `page.evaluate` 执行时才炸，生产日志里表现为 `Page.evaluate: SyntaxError`，本地单测和 `compileall` 都看不见。这个脚本用 `ast` 把那些常量抠出来交给 `node --check`。
 

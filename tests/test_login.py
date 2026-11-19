@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import contextlib
+import io
+import os
 import unittest
 from unittest.mock import MagicMock, patch
 
@@ -219,6 +222,61 @@ class TestStealth(unittest.TestCase):
         with patch.object(login, "STORAGE_PATH", storage):
             context = restore_state(browser)
         context.add_init_script.assert_called_once()
+
+
+class TestPrepareDisplay(unittest.TestCase):
+    """首次登录最常见的坑: config.json 写了 display=":99" 但机器上只有 :0(或啥都没有)。
+
+    人工登录走的是当前 shell 的 DISPLAY, 不读 config.json —— 所以必须有这层检查,
+    否则新人拿到的是 Playwright 的 "Missing X server or $DISPLAY" 栈。
+    日志走 logutil.log(print 到 stdout), 所以用 redirect_stdout 取文案。
+    """
+
+    def setUp(self):
+        self._saved = os.environ.pop("DISPLAY", None)
+
+    def tearDown(self):
+        os.environ.pop("DISPLAY", None)
+        if self._saved is not None:
+            os.environ["DISPLAY"] = self._saved
+
+    def _run(self, explicit, needs_display):
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            ok = login._prepare_display(explicit, needs_display)
+        return ok, buf.getvalue()
+
+    def test_explicit_display_wins_and_is_exported(self):
+        os.environ["DISPLAY"] = ":0"
+        ok, out = self._run(":99", True)
+        self.assertTrue(ok)
+        self.assertEqual(os.environ["DISPLAY"], ":99")
+        self.assertIn(":99", out)
+
+    def test_existing_shell_display_is_reused(self):
+        os.environ["DISPLAY"] = ":0"
+        ok, _ = self._run(None, True)
+        self.assertTrue(ok)
+        self.assertEqual(os.environ["DISPLAY"], ":0")
+
+    def test_missing_display_refuses_with_actionable_hint(self):
+        ok, out = self._run(None, True)
+        self.assertFalse(ok)
+        self.assertIn("DISPLAY", out)
+        self.assertIn("xvfb", out.lower())
+        self.assertIn("--display :99", out)
+        # 顺带提醒 sudo 会丢 DISPLAY —— 这是同一现象的第二大成因
+        self.assertIn("sudo", out)
+
+    def test_headless_needs_no_display(self):
+        ok, _ = self._run(None, False)
+        self.assertTrue(ok)
+        self.assertNotIn("DISPLAY", os.environ)
+
+    def test_blank_display_counts_as_missing(self):
+        os.environ["DISPLAY"] = "   "
+        ok, _ = self._run(None, True)
+        self.assertFalse(ok)
 
 
 if __name__ == "__main__":
