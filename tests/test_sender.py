@@ -11,6 +11,8 @@ from src import vision_cv
 from src.sender import (
     _JS_CLEAR_BOX,
     _JS_INJECT_AND_SEND,
+    _JS_LAST_BUBBLE_SELF,
+    _JS_MSG_TAIL,
     _JS_READ_BOX_TEXT,
     SEND_BTN_SYNTH_SELECTORS,
     SEND_BUTTON_SELECTORS,
@@ -31,6 +33,34 @@ from src.sender import (
     verify_chat_opened_ready,
     xpath_text_literal,
 )
+
+
+class TestTailEvidenceReadsTheRightRow(unittest.TestCase):
+    """板端 2026-11-19 实测的两条口径: 只认精确一级气泡类名, 且索引 0 = 最新一条。
+
+    这两条都属于「证据读错了」而不是「证据读不到」—— 读错比读不到更危险:
+    _evidence() 会把虚高的数量和错误的尾部当成硬证据, 于是确认链一路判成功。
+    """
+
+    def test_strict_selector_is_used_first(self):
+        for js in (_JS_MSG_TAIL, _JS_LAST_BUBBLE_SELF):
+            self.assertIn("messageMessageBoxmessageBox", js)
+            self.assertIn("const STRICT", js)
+            # 宽泛类名会把 contentBox/rowBox 也数成气泡, 不该再出现在候选里
+            self.assertNotIn('"[class*="MessageBox"]', js)
+            self.assertNotIn('"[class*="bubble"]', js)
+
+    def test_latest_row_is_index_zero(self):
+        # 旧版取 boxes[boxes.length - 1] 拿到的是最早那条(多为时间分隔/空行)
+        self.assertIn("textOf(boxes[0])", _JS_MSG_TAIL)
+        self.assertIn("textOf(boxes[1])", _JS_MSG_TAIL)
+        self.assertNotIn("boxes[boxes.length - 1]", _JS_MSG_TAIL)
+        self.assertIn("const box = boxes[0]", _JS_LAST_BUBBLE_SELF)
+
+    def test_zero_height_placeholders_are_dropped(self):
+        # 虚拟滚动会留下 height=0 的占位行, 数进去气泡数就虚高了
+        for js in (_JS_MSG_TAIL, _JS_LAST_BUBBLE_SELF):
+            self.assertIn("getBoundingClientRect().height > 1", js)
 
 
 class TestXpathTextLiteral(unittest.TestCase):

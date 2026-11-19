@@ -263,6 +263,12 @@ _JS_MSG_TAIL = """
     list = best ? best.el : null;
   }
   if (!list) return out;
+  // 2026-11-19 板端实测: 只认精确一级 messageMessageBoxmessageBox(真实 13 行)。
+  // 旧版 [class*="messageMessageBox"], [class*="MessageBox"], [class*="bubble"] 把
+  // contentBox/columnBox/rowBox/Bottomwrapper 各算一行 —— 13 行数成 112 个, 再乘上
+  // 容器成 120。数量一虚, _evidence() 里「新增气泡」这条唯一的硬证据就失效了。
+  const STRICT = '[class*="messageMessageBoxmessageBox"]';
+  const KEYED = '[data-index]';
   const textOf = (n) => {
     const parts = [];
     for (const el of n.querySelectorAll('img[alt], img[title]')) {
@@ -276,14 +282,23 @@ _JS_MSG_TAIL = """
     if (raw && !parts.length) parts.push(raw);
     return parts.join(' ');
   };
-  let boxes = [...list.querySelectorAll(
-    '[class*="messageMessageBoxmessageBox"], [class*="messageMessageBox"], [class*="MessageBox"], [class*="bubble"]')];
+  let boxes = [...list.querySelectorAll(STRICT)];
+  if (!boxes.length) {
+    boxes = [...list.querySelectorAll(KEYED)]
+      .filter(e => e.querySelector('[data-e2e="msg-item-content"]'));
+  }
   if (!boxes.length) {
     boxes = [...list.children].filter(e => (e.innerText || '').trim() || e.querySelector('img[alt], img[title]'));
   }
+  // 只保留真正有尺寸的行(虚拟滚动会留下 height=0 的占位行)
+  boxes = boxes.filter(b => b.getBoundingClientRect().height > 1);
   out.n = boxes.length;
-  if (boxes.length) out.last = textOf(boxes[boxes.length - 1]);
-  if (boxes.length > 1) out.prev = textOf(boxes[boxes.length - 2]);
+  // 2026-11-19 板端实测: 列表 top 随 DOM 索引**递减** —— 索引 0 才是最新一条。
+  // 旧版取末元素拿到的是最早那条(通常是时间分隔/空行), 所以
+  // last 恒为 '', 文本级证据从来没生效过。这一条和上面的 STRICT 是一组: 数量取准、
+  // 尾部取对, 「新增气泡」才真的是硬证据。
+  if (boxes.length) out.last = textOf(boxes[0]);
+  if (boxes.length > 1) out.prev = textOf(boxes[1]);
   return out;
 }
 """
@@ -311,13 +326,21 @@ _JS_LAST_BUBBLE_SELF = """
   let list = document.querySelector(
     '[class*="messageMessageListlist"], [class*="messageMessageList"], [class*="MessageList"], [data-e2e*="message-list"]');
   if (!list) return null;
-  let boxes = [...list.querySelectorAll(
-    '[class*="messageMessageBoxmessageBox"], [class*="messageMessageBox"], [class*="MessageBox"], [class*="bubble"]')];
+  // 与 _JS_MSG_TAIL 同一套选择器与同一套索引口径, 否则两处读到的「最后一条」
+  // 不是同一条, 旁证会和主证据互相矛盾。
+  const STRICT = '[class*="messageMessageBoxmessageBox"]';
+  const KEYED = '[data-index]';
+  let boxes = [...list.querySelectorAll(STRICT)];
+  if (!boxes.length) {
+    boxes = [...list.querySelectorAll(KEYED)]
+      .filter(e => e.querySelector('[data-e2e="msg-item-content"]'));
+  }
   if (!boxes.length) {
     boxes = [...list.children].filter(e => (e.innerText || '').trim() || e.querySelector('img[alt], img[title]'));
   }
+  boxes = boxes.filter(b => b.getBoundingClientRect().height > 1);
   if (!boxes.length) return null;
-  const box = boxes[boxes.length - 1];
+  const box = boxes[0];  // 索引 0 = 最新一条(同 _JS_MSG_TAIL 的板端实测)
   const br = box.getBoundingClientRect();
   const lr = list.getBoundingClientRect();
   if (!br.width || !lr.width) return null;
