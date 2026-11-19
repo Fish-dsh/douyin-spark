@@ -6,7 +6,7 @@
 
 > **免责声明**：本项目为个人自动化实践，与抖音官方无关。自动化操作可能触发平台风控，请自行评估风险并遵守平台协议；由此产生的任何后果由使用者自负。
 
-`Python 3.11+` · `Playwright (Chromium)` · `MIT` · `510+ 单元测试`
+`Python 3.11+` · `Playwright (Chromium)` · `MIT` · `527 单元测试`
 
 ---
 
@@ -100,7 +100,7 @@ README 只放主干，细节都在 `docs/`：
 | 人 | [docs/self-heal.md](docs/self-heal.md) | 自愈机制：错误分类、恢复策略表、告警 |
 | 人 | [docs/development.md](docs/development.md) | 跑测试、lint、本地开发、提 PR 前自检 |
 | Agent | [AGENTS.md](AGENTS.md) | 仓库地图、命令清单、改动约定（给 AI/自动化代理看的） |
-| 人 | [docs/notes/](docs/notes/README.md) | **研发实况笔记**：会话工作日志、小板开 GPU 的实测报告、每日交接单（已脱敏） |
+| 人 | [docs/notes/](docs/notes/README.md) | **实测笔记**：为什么这个项目必须有头跑 —— headless 在 ARM 小板上的完整失败实测（含原始参数与截图数据） |
 
 ## 许可证
 

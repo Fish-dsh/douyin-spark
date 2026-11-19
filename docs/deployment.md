@@ -19,7 +19,7 @@
 > 部署完逐项核对：代码同步（`git status` 应为干净）／时区（`timedatectl` 应为 Asia/Shanghai）／健康检查 cron（01:45）／当晚真机跑一次看日志收尾。
 
 1. 依赖：`python3 -m venv .venv && .venv/bin/pip install -r requirements.txt && .venv/bin/playwright install chromium`
-2. 准备 `config.json`（`engine: chromium`、自动发现、`send_window` 对齐 cron）。
+2. 准备 `config.json`（自动发现、`send_window` 对齐 cron；`headless` 必须 `false`）。`engine` 字段已废弃，代码不读，别写。
 3. **git 兜底**：项目已是 git 仓库。scp 整目录会带上 `.git`；若只传代码文件，部署机上执行 `git init && git add -A && git commit -m "chore: import"`。
 4. 部署机上配 cron：`crontab -e` 写入 `0 0 * * * /opt/douyin-spark/run_cron.sh`，并确保脚本可执行：`chmod +x /opt/douyin-spark/run_cron.sh && chown -R USER:GROUP /opt/douyin-spark`（**scp/覆盖更新脚本会丢 x 位，cron 调用将 Permission denied 且无日志，务必校验**）。
 5. **健康检查 cron**（堵静默失败，**晚于主任务最晚可能的收尾时刻**）：`45 1 * * * /opt/douyin-spark/.venv/bin/python /opt/douyin-spark/src/health_check.py --quiet --notify-only-on-change`（如需告警，先在 `config.json` 配 `notify_cmd`，见 `docs/operations.md`）。原为 `15 1`，2026-10-04 随 `timeout 45m → 90m` 推迟到 **01:45**。**"最晚 01:30 收尾"这个前提现在由 `run_cron.sh` 的硬截止 `_HARD_STOP_MIN=95`（01:35）保证**：距 01:35 不足 20 分钟不再起新一轮，每轮 timeout 也按剩余时间收窄（00:00 起的第一轮仍是完整 90m）。否则 rc=3 的重跑能跑到 01:53，而 health_check 见"主任务还在跑"会**不判定地退 0**——那一晚等于没人检查过。

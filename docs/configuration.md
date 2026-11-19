@@ -16,7 +16,7 @@
 | `browser_recycle_mem_mb` | `300` | 复用模式下，`MemAvailable` 低于该值就回收浏览器实例 |
 | `block_resources` | `true` | 拦截图片/字体/媒体，省带宽与内存 |
 | `self_heal` | `true` | 错误分类 → 本地策略恢复（可用 `SPARK_SELF_HEAL=0` 关掉） |
-| `vision_fallback` | `true` | 视觉兜底（`vision_provider` 指定多模态来源；无 key 时自动跳过） |
+| `vision_fallback` | `true` | 视觉兜底：四条 DOM 策略全失效时，用多模态模型粗定位 + DOM 现场取证找回会话行。`vision_provider` 指定主用来源（默认 `agnes`，备 `glm`）。**没配任何模型 key 时自动空转**（日志一行「未配置视觉模型 key…跳过」），不会影响主流程。可用 `SPARK_VISION=0` 关掉 |
 | `notify_cmd` | `""` | 失败告警命令，`HEALTH_FAIL_MSG` 环境变量带原因 |
 
 ## 环境变量

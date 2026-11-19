@@ -27,7 +27,7 @@ python3 -m venv .venv
 
 - 页面结构看 `src/debug.py` 的截图与 dump。
 - 定位链路卡住时先跑 `spark.py --dry-run`，它会打印每一步选择了哪个元素、为什么放弃。
-- 视觉兜底（`src/vision.py`）默认关掉也不会崩：没有模型 key 时自动跳过。
+- 视觉兜底（`src/vision.py`）默认**开**（无人值守时它是选择器全失效的唯一活路），但没有模型 key 时自动空转返回空表，行为等同关闭，不会崩。要显式关掉用 `SPARK_VISION=0` 或 `vision_fallback: false`。
 
 ## 提交前自检
 
