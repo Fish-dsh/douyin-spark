@@ -1,0 +1,15 @@
+# 统一用 LF。Windows 上某些编辑器/工具(以及 python 的 Path.write_text 默认
+# newline=None) 会把整文件改成 CRLF, 于是 git diff 变成「全文件重写」,
+# 真正改了哪几行完全看不出来 —— 2026-11-19 踩过一次, 一个 3 行的改动变成了
+# 3000 行的 diff。写文件请显式 newline=LF。
+* text=auto eol=lf
+
+# 二进制资源别让 git 尝试转换
+*.png binary
+*.jpg binary
+*.ico binary
+
+# shell 脚本必须 LF, 否则在 Linux 上会报 bad interpreter: /bin/bash^M
+*.sh text eol=lf
+run_cron.sh text eol=lf
+run_dev.sh text eol=lf
