@@ -100,6 +100,7 @@ README 只放主干，细节都在 `docs/`：
 | 人 | [docs/self-heal.md](docs/self-heal.md) | 自愈机制：错误分类、恢复策略表、告警 |
 | 人 | [docs/development.md](docs/development.md) | 跑测试、lint、本地开发、提 PR 前自检 |
 | Agent | [AGENTS.md](AGENTS.md) | 仓库地图、命令清单、改动约定（给 AI/自动化代理看的） |
+| 人 | [docs/notes/](docs/notes/README.md) | **研发实况笔记**：会话工作日志、小板开 GPU 的实测报告、每日交接单（已脱敏） |
 
 ## 许可证
 
