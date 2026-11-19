@@ -1,0 +1,34 @@
+# ruff 配置（2026-08-15 新增）
+#
+# 本项目的 ruff 告警绝大多数是有意为之的韧性写法, 统一豁免并注释原因,
+# 而非逐行 noqa(浏览器自动化代码里这类模式出现频率极高):
+#   - BLE001 盲捕 Exception: Playwright 会抛任意异常, 各环节必须兜底不中断整体流程
+#   - S110/S112 try-except-pass/continue: 多策略降级中「某候选失败继续下一个」是设计意图
+# 新代码仍应尽量缩小 except 范围; 豁免不代表推荐写法。
+[lint]
+ignore = [
+  "BLE001",  # blind except Exception: 有意兜底, 见文件头注释
+  "S110",    # try-except-pass: 候选策略失败继续, 见文件头注释
+  "S112",    # try-except-continue: 同上
+  "EXE001",  # shebang 却无 exec 位: 入口统一由 .venv/bin/python 调用, 不需可执行位; 且本仓经常经 WSL /mnt/c 传输(会丢 exec 位)。新增确需直接执行的脚本(如 cron 包装)请 chmod +x 并从此豁免移除
+]
+
+[lint.per-file-ignores]
+# 持久文件句柄(atexit 统一关闭)与本地时间日志: 有意为之
+"logutil.py" = ["SIM115", "DTZ005"]
+# 备份目录名/冷却按机器本地自然日: 有意为之
+"self_heal.py" = ["DTZ005", "DTZ011"]
+# 时间口径=机器本地时(2026-08-15 定, 曾误用 UTC 已废弃, 勿再引入时区):
+# 窗口判定/state 日期/健康检查/截图时间戳全部用本地时(datetime.now()/strptime 无 tz), 有意为之
+"src/scheduler.py" = ["DTZ005"]
+"src/config.py" = ["DTZ007"]
+"src/debug.py" = ["DTZ005"]
+# 嗅探样本文件名/时间戳按机器本地时: 与全项目时间口径一致(见 config.py 头注释)
+"src/net_sniff.py" = ["DTZ005"]
+# 视觉截图文件名时间戳按机器本地时: 同上
+"src/vision.py" = ["DTZ005"]
+"health_check.py" = ["DTZ005"]
+# 日志按天分桶用机器本地日期: 与 spark.log 时间戳同口径
+"strat_stats.py" = ["DTZ005"]
+# 测试夹具用朴素时间构造, 无业务含义
+"tests/*.py" = ["DTZ001", "DTZ005", "DTZ007", "DTZ011"]
