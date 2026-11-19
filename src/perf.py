@@ -64,6 +64,7 @@ _SPECS: dict[str, dict[str, object]] = {
         "escape_settle_ms": 300,  # Esc 收起浮层后
         "type_settle_ms": 200,  # 点完输入框、开始键入前
         "btn_ready_ms": 600,  # 注入文本后等按钮由灰变红
+        "send_confirm_ms": 700,  # 点完发送按钮后等输入框清空/气泡出现
         "short_settle_ms": 500,  # 通用短停顿
         "scroll_settle_ms": 600,  # 火花列表滚一屏后等新行渲染
         "post_reload_settle_ms": 1000,
@@ -130,6 +131,7 @@ _SPECS: dict[str, dict[str, object]] = {
         "escape_settle_ms": 200,
         "type_settle_ms": 150,
         "btn_ready_ms": 400,
+        "send_confirm_ms": 550,
         "short_settle_ms": 400,
         "scroll_settle_ms": 450,
         "post_reload_settle_ms": 700,
@@ -184,6 +186,7 @@ _SPECS: dict[str, dict[str, object]] = {
         "escape_settle_ms": 120,
         "type_settle_ms": 100,
         "btn_ready_ms": 300,
+        "send_confirm_ms": 450,
         "short_settle_ms": 300,
         "scroll_settle_ms": 300,
         "post_reload_settle_ms": 500,
@@ -241,6 +244,7 @@ _BOUNDS: dict[str, tuple[int, int]] = {
     "escape_settle_ms": (0, 5000),
     "type_settle_ms": (0, 5000),
     "btn_ready_ms": (0, 5000),
+    "send_confirm_ms": (0, 5000),
     "short_settle_ms": (0, 5000),
     "scroll_settle_ms": (0, 5000),
     "post_reload_settle_ms": (0, 5000),
@@ -378,6 +382,7 @@ _SLEEP_KEYS = (
     "ui_quiet_ms",
     "escape_settle_ms",
     "btn_ready_ms",
+    "send_confirm_ms",  # 合成点击发送后等 UI 确认(见 sender.try_send_button_or_enter)
     "confirm_first_ms",
     "tail_first_ms",
 )
@@ -387,6 +392,7 @@ _SLEEP_REPEAT = {
     "ui_quiet_ms": 2,
     "escape_settle_ms": 2,
     "btn_ready_ms": 1,
+    "send_confirm_ms": 1,
     "confirm_first_ms": 1,
     "tail_first_ms": 1,
 }

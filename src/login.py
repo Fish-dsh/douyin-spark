@@ -34,6 +34,31 @@ from .stealth import apply_stealth
 _CHROMIUM_PATH = None
 
 
+def _candidate_homes() -> list[str]:
+    """按「最可能装过浏览器」的顺序列出家目录。
+
+    为什么要看别人的家目录: playwright 的浏览器装在**执行安装命令那个用户**的
+    ~/.cache/ms-playwright 下。运维常见姿势是用 sudo 跑一次安装、再用普通用户跑
+    cron, 于是两个家目录对不上, 现场表现就是「明明装了浏览器却找不到」。
+    顺序: 当前用户 → SUDO_USER → /home 下各用户 → /root。都不存在就交 playwright 默认。
+    """
+    homes: list[str] = [str(Path.home())]
+    sudo_user = (os.environ.get("SUDO_USER") or "").strip()
+    if sudo_user:
+        # SUDO_USER 是裸用户名(不带路径), 补成绝对路径; 已经不是裸名就原样用。
+        homes.append(sudo_user if "/" in sudo_user else f"/home/{sudo_user}")
+    try:
+        homes.extend(sorted(p.as_posix() for p in Path("/home").iterdir() if p.is_dir()))
+    except OSError:
+        pass
+    homes.append("/root")
+    uniq: list[str] = []
+    for h in homes:
+        if h not in uniq:
+            uniq.append(h)
+    return uniq
+
+
 def _resolve_chromium() -> str | None:
     """返回可用的 chromium 可执行文件路径, 无则 None(交 playwright 默认处理)。"""
     global _CHROMIUM_PATH
@@ -46,9 +71,9 @@ def _resolve_chromium() -> str | None:
     ):
         _CHROMIUM_PATH = env
         return env
-    for user in (str(Path.home()), "/home/BOARD"):
+    for home in _candidate_homes():
         for pat in ("chromium*/chrome-linux*/chrome", "chromium*/chrome-linux/chrome"):
-            for hit in glob.glob(f"{user}/.cache/ms-playwright/{pat}"):
+            for hit in glob.glob(f"{home}/.cache/ms-playwright/{pat}"):
                 if os.path.isfile(hit) and os.access(hit, os.X_OK):
                     _CHROMIUM_PATH = hit
                     return hit

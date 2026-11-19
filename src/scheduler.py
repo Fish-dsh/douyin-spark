@@ -22,10 +22,12 @@ from .config import (
     DEFAULT_BROWSER_REUSE,
     RUNTIME_DIR,
     SEND_STICKER,
+    ConfigError,
     get_account_storage_file,
     in_window,
     load_config,
     load_state,
+    preflight,
     write_state,
 )
 from .debug import dump_page
@@ -1274,6 +1276,15 @@ def run() -> None:
     args = parser.parse_args()
 
     cfg = load_config()
+    # 2026-11-02 事故后加的硬门禁: accounts 缺失/为空/条目没有 name 时**不许跑**。
+    # 以前这里只 log 一句就 return, rc=0 —— 那一晚实际发送 0 个好友, 而 health_check
+    # 判健康、告警也没发出来, 整条链上没有一个环节会出声。退出码 5 由 run_cron.sh
+    # 单独分支处理(不重试、不计成功), 见 AGENTS.md 的退出码契约。
+    try:
+        preflight(cfg)
+    except ConfigError as exc:
+        log(f"[ERROR] 配置不可用, 本轮拒绝运行: {exc}")
+        raise SystemExit(5) from exc
     # 2026-11-01: 启动即把档位打进日志。以前「这台机器在跑哪一档」只能翻 config.json
     # 猜, 而档位同时决定浏览器资源上限与全流程等待节奏, 出问题第一个要看的就是它。
     log(f"[perf] {perf.describe()}")
@@ -1297,8 +1308,10 @@ def run() -> None:
 
     accounts = cfg.get("accounts") or []
     if not accounts:
-        log("【config.json 中未配置 accounts, 无可处理的账号】")
-        return
+        # preflight 已经拦过一遍; 走到这里说明有人在 load_config 之后动过 cfg,
+        # 仍然不许静默 rc=0(见 preflight 的 docstring)。
+        log("[ERROR] accounts 为空, 本轮拒绝运行")
+        sys.exit(5)
 
     if not _acquire_pid_lock():
         # 获锁失败必须给**非 0** 退出码: 裸 return 会让 cron 与自愈验证都看到 rc=0,

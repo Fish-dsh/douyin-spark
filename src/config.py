@@ -127,6 +127,31 @@ def load_config() -> dict:
     return cfg
 
 
+class ConfigError(RuntimeError):
+    """配置缺失到「跑下去也毫无意义」的程度。必须让调用方非 0 退出。"""
+
+
+def preflight(cfg: dict) -> None:
+    """跑之前先确认这份配置是能真正干活的。
+
+    为什么不用「警告 + 空列表」: 2026-11-02 事故里, config.json 被部署覆盖成 19 字节
+    的桩, 空 accounts 让 run_cron.sh 以 rc=0 结束 —— 那一晚实际发送 0 个好友, 而
+    health_check 判健康、告警通道同时消失, 整条链上没有任何一个环节会出声。
+    缺到这个程度只能是硬失败: 抛 ConfigError, 由调用方转成退出码 5。
+    """
+    accounts = cfg.get("accounts") or []
+    if not accounts:
+        raise ConfigError(
+            "config.json 里没有 accounts: 这次运行会发送 0 个好友。"
+            "请从 config.json.bak-* 恢复, 或补上 accounts 列表。"
+        )
+    for i, acc in enumerate(accounts):
+        if not isinstance(acc, dict):
+            raise ConfigError(f"accounts[{i}] 不是对象: {acc!r}")
+        if not str(acc.get("name") or "").strip():
+            raise ConfigError(f"accounts[{i}] 没有 name 字段")
+
+
 def get_account_state_file(account: dict) -> Path:
     """获取指定账号的 state 文件路径(优先用配置的 state_file)。"""
     name = account.get("name", "default")

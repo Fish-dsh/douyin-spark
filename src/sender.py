@@ -53,6 +53,23 @@ SEND_BUTTON_SELECTORS = [
     "svg[data-e2e*='send']",
 ]
 
+# 表情按钮候选(2026-11-01 板端 DOM 实测): 表情键是
+# <svg class="messageMsgInputiconAction">, 既没有 title/aria-label, 也没有
+# data-e2e —— 只有混淆类名可用。按「先按选择器就地派发, 再按先前量到的坐标点」
+# 的顺序用它, 理由见 synthetic_click 的 docstring。
+EMOJI_BTN_SELECTORS: tuple[str, ...] = (
+    "svg[class*='iconAction']",
+    "[class*='iconAction']",
+)
+
+# 合成点击用的发送键候选: 只取 SEND_BUTTON_SELECTORS 里**类名类**的前两条。
+# 文案类(button:has-text('发送'))与 [class*='send'] 这类宽泛选择器不进这里 ——
+# 合成点击是「在元素中心派发事件」, 命中范围越宽越容易点到别的东西上。
+SEND_BTN_SYNTH_SELECTORS: tuple[str, ...] = (
+    "svg[class*='publishBtn']",
+    "[class*='e2e-send-msg-btn']",
+)
+
 _JS_FIND_SEND_BTN = """
 () => {
   const box = document.querySelector('[contenteditable="true"]')
@@ -475,10 +492,42 @@ def try_send_button_or_enter(
 ) -> str:
     """触发发送; 返回做了什么的描述(调用方写进日志, 不再谎报「已发送」)。
 
-    顺序: 几何定位(命中校验) → 具名选择器 → Enter 兜底。Enter 只作为最后手段,
-    因为它在本项目历史上多次「按了但没发出」。
+    顺序: JS 合成点击 → 几何定位(命中校验) → 具名选择器 → Enter 兜底。
+    Enter 只作为最后手段, 因为它在本项目历史上多次「按了但没发出」。
+
+    合成点击排第一是因为 2026-11-02 板端实测: Playwright 的 mouse/keyboard 在
+    无窗口管理器的 Xvfb 上全部无效(点发送键连网络请求都没有), 只有 JS 合成的
+    指针序列能触发 React。桌面档上两种都能用, 合成点击并不会更差 —— 它同样要
+    过「输入框是否清空」这一关, 没清空就继续往下走, 不谎报已发送。
     """
     aid = attempt or events.attempt_id()
+    # 0) JS 合成点击: 板端唯一真正生效的路径(见 synthetic_click_at 的 docstring)。
+    #    每个候选点完都得过「输入框是否清空」这一关, 没清空就换下一个, 与后面
+    #    几何/选择器两条路同一把尺子 —— 派发成功不等于发出去了。
+    for sel in SEND_BTN_SYNTH_SELECTORS:
+        got = synthetic_click(page, sel)
+        if not got:
+            continue
+        page.wait_for_timeout(perf.ms("send_confirm_ms"))
+        try:
+            emptied = bool(page.evaluate(_JS_BOX_EMPTY))
+        except Exception:
+            emptied = False
+        if not emptied:
+            log(f"[发送] 合成点击 {sel} 后输入框未清空, 试下一个候选")
+            continue
+        log(f"[发送] 已点击发送按钮(合成事件: {got['x']},{got['y']})")
+        events.emit(
+            "send_button",
+            "click",
+            "ok",
+            friend=friend,
+            attempt=aid,
+            verified=None,
+            extra={"via": "synthetic", "sel": sel[:40], "x": got["x"], "y": got["y"]},
+        )
+        return f"已点击发送按钮(合成 {got['x']},{got['y']})"
+
     hit = _click_geometry_send_button(page)
     if hit:
         log(f"[发送] 已点击发送按钮(几何命中: {hit})")
@@ -1101,6 +1150,148 @@ def verify_chat_opened_ready(
     return True, f"{detail}, 无法判定, 放行{extra}"
 
 
+_JS_SYNTH_CLICK_AT = """([x, y]) => {
+    const el = document.elementFromPoint(x, y);
+    if (!el) return false;
+    const mk = (type, Ctor) => new Ctor(type, {
+        bubbles: true, cancelable: true, composed: true,
+        clientX: x, clientY: y, button: 0, buttons: 1, view: window});
+    for (const [type, Ctor] of [
+        ['pointerover', PointerEvent], ['pointerdown', PointerEvent],
+        ['mousedown', MouseEvent], ['pointerup', PointerEvent],
+        ['mouseup', MouseEvent], ['click', MouseEvent],
+    ]) {
+        el.dispatchEvent(mk(type, Ctor));
+    }
+    return true;
+}"""
+
+
+_JS_SYNTH_CLICK_SEL = """(sel) => {
+    const el = document.querySelector(sel);
+    if (!el) return null;
+    const r = el.getBoundingClientRect();
+    if (r.width <= 0 || r.height <= 0) return null;
+    const x = r.x + r.width / 2, y = r.y + r.height / 2;
+    const mk = (type, Ctor) => new Ctor(type, {
+        bubbles: true, cancelable: true, composed: true,
+        clientX: x, clientY: y, button: 0, buttons: 1, view: window});
+    for (const [type, Ctor] of [
+        ['pointerover', PointerEvent], ['pointerdown', PointerEvent],
+        ['mousedown', MouseEvent], ['pointerup', PointerEvent],
+        ['mouseup', MouseEvent], ['click', MouseEvent],
+    ]) {
+        el.dispatchEvent(mk(type, Ctor));
+    }
+    return {x: Math.round(x), y: Math.round(y)};
+}"""
+
+
+_JS_CLICK_STICKER = """(name) => {
+    // 「找到就点」一次做完: 2026-11-02 审计发现, 先 JS_FIND_STICKER 量坐标、
+    // 再由 Python 派发点击, 中间面板还在做入场动画(或滚动吸附) —— 量到的
+    // 矩形和真正点击那一刻差几十像素, 于是点空: 面板关了、一条新消息都没有。
+    // 板端 6 次「表情面板已关闭但无任何新增」全是这一类。
+    const panel = document.querySelector(
+        '[class*="emojiPanel"], [class*="stickerPanel"], [data-e2e*="emoji"]');
+    let items = [];
+    if (panel) {
+        items = panel.querySelectorAll('[class*="emojiItem"]:not([class*="Desc"])');
+    }
+    if (!items.length) {
+        items = document.querySelectorAll(
+            '[class*="emojiItem"]:not([class*="Desc"]), [class*="stickerItem"]');
+    }
+    let occluded = null;
+    for (const item of items) {
+        if (!(item.innerText || '').trim().includes(name)) continue;
+        let r = item.getBoundingClientRect();
+        if (!(r.width > 0 && r.height > 0)) continue;
+        try { item.scrollIntoView({block: 'nearest', inline: 'nearest'}); } catch (e) {}
+        r = item.getBoundingClientRect();
+        const x = Math.round(r.x + r.width / 2);
+        const y = Math.round(r.y + r.height / 2);
+        if (x <= 0 || y <= 0 || x >= window.innerWidth || y >= window.innerHeight) continue;
+        const hit = document.elementFromPoint(x, y);
+        if (!hit) continue;
+        if (hit !== item && !item.contains(hit) && !hit.contains(item)) {
+            if (!occluded) occluded = {x: x, y: y, tag: hit.tagName,
+                cls: (hit.className || '').toString().slice(0, 40)};
+            continue;
+        }
+        // 就地派发(与 synthetic_click_at 同一套六连), 不用 Python 再算一遍坐标。
+        const opts = {bubbles: true, cancelable: true, composed: true,
+                      clientX: x, clientY: y, button: 0, buttons: 1, view: window};
+        const target = hit;
+        for (const type of ['pointerover', 'pointerdown', 'mousedown',
+                            'pointerup', 'mouseup', 'click']) {
+            const Ctor = type.startsWith('pointer') ? PointerEvent : MouseEvent;
+            target.dispatchEvent(new Ctor(type, opts));
+        }
+        return {ok: true, x: x, y: y, tag: target.tagName};
+    }
+    if (occluded) return {ok: false, error: 'sticker_occluded', at: occluded};
+    return {ok: false, error: 'sticker_not_found'};
+}"""
+
+
+def synthetic_click_at(page: Page, x: float, y: float) -> bool:
+    """在 (x, y) 处向 elementFromPoint 命中元素派发合成指针/鼠标事件序列。
+
+    2026-11-02 板端实测(Xvfb :99, 无窗口管理器): Playwright 的
+    page.mouse.click / locator.click / keyboard.type / keyboard.press 在这台
+    机器上**全部无效** —— 点发送键无任何网络请求、输入框不清空、点表情键面板
+    不弹、Enter 也发不出去。唯独 JS 里合成的
+    pointerover→pointerdown→mousedown→pointerup→mouseup→click 序列能真正触发
+    React 处理器: 发送键一次成功(POST imapi.douyin.com/v1/message/send, 输入框
+    清空), 表情键一次就把面板打开。
+
+    这就是「表情主路径整月全挂 + 文字层靠视觉兜底」的底层原因。桌面档上
+    可信点击本来就正常, 合成事件只是等价的一条路, 故不做档位区分 —— 但所有
+    调用方都必须用「输入框是否清空 / 面板是否打开」复核, 不能把「派发成功」
+    当成「操作成功」。
+    """
+    try:
+        return bool(page.evaluate(_JS_SYNTH_CLICK_AT, [x, y]))
+    except Exception as exc:
+        log(f"[合成点击] ({x},{y}) 派发失败: {exc}")
+        return False
+
+
+def _click_coords(got):
+    """把 JS 的合成点击返回值收敛成 {x, y} 或 None。
+
+    元素不存在时 JS 返回 null; 但 evaluate 也可能返回别的东西(旧版本脚本、被 mock、
+    扩展注入)。只要拿到的不是带数值 x/y 的 dict 就当没点到 —— 否则调用方拿到的
+    「坐标」会在日志里打出一串看不懂的东西, 而分支以为自己点过了。
+    """
+    if not isinstance(got, dict):
+        return None
+    x, y = got.get("x"), got.get("y")
+    if isinstance(x, bool) or isinstance(y, bool):
+        return None
+    if not isinstance(x, (int, float)) or not isinstance(y, (int, float)):
+        return None
+    return {"x": x, "y": y}
+
+
+def synthetic_click(page: Page, selector: str):
+    """按选择器取第一个元素, 向它的中心派发合成点击; 返回坐标 dict 或 None。
+
+    优先于「先量坐标再点」: 量完到点下去之间页面会重排(输入栏变高、草稿换行),
+    按钮挪十几像素就点空了。板端 14 天里 18 次「表情面板未打开」全是这类。
+    """
+    try:
+        got = page.evaluate(_JS_SYNTH_CLICK_SEL, selector)
+    except Exception as exc:
+        log(f"[合成点击] {selector} 派发失败: {exc}")
+        return None
+    hit = _click_coords(got)
+    if hit is None and got is not None:
+        log(f"[合成点击] {selector} 返回值无法解析({type(got).__name__}), 当作未命中")
+    return hit
+
+
 _JS_SYNTH_ROW_CLICK = """(name) => {
     let t = null;
     for (const el of document.querySelectorAll('span,div')) {
@@ -1286,7 +1477,18 @@ def send_sticker(
             attempt=aid,
             extra={"x": btn["x"], "y": btn["y"]},
         )
-        page.mouse.click(btn["x"], btn["y"])
+        # 2026-11-02: 实测 page.mouse.click 在本机(无窗口管理器的 Xvfb)完全无效,
+        # 表情面板根本弹不出来, 必须走 JS 合成事件。而且优先「按选择器就地派发」
+        # 而不是「按先前量到的坐标点」: 板端 14 天里有 18 次「表情面板未打开」,
+        # 都是量完坐标到真正点下去之间输入栏重排了(草稿变高/多行), 按钮挪了十几
+        # 像素, 点在空白上。面板是否真打开由下面的 JS_PANEL_VISIBLE 复核。
+        opened_by_sel = False
+        for sel in EMOJI_BTN_SELECTORS:
+            if synthetic_click(page, sel):
+                opened_by_sel = True
+                break
+        if not opened_by_sel:
+            synthetic_click_at(page, btn["x"], btn["y"])
 
         # 面板打开等待: 循环内一检测到即 break, 故加大上限只影响「本会失败」的场景,
         # 对正常好友(<3s 打开)零延迟。2026-10-06 好友A实测: 经 synthetic_click_row
@@ -1362,7 +1564,17 @@ def send_sticker(
         # 基线必须在**点击表情之前**取: 文案固定为「续火花」, 昨晚那条表情还挂在列表
         # 尾部, 只比文本会把残留读成本次发送。
         base = read_tail(page)
-        page.mouse.click(target["x"], target["y"])
+        # 「找到就点」一次做完: 先 JS_FIND_STICKER 量坐标、再由 Python 派发点击,
+        # 中间面板还在做入场动画(或滚动吸附), 量到的矩形和真正点击那一刻差几十
+        # 像素就点空 —— 面板关了、一条新消息都没有(板端 6 次「表情面板已关闭但
+        # 无任何新增」全是这类)。_JS_CLICK_STICKER 内部就地派发, 失败才退回坐标。
+        clicked = page.evaluate(_JS_CLICK_STICKER, sticker_name)
+        if not (isinstance(clicked, dict) and clicked.get("ok")):
+            why = (clicked or {}).get("error") if isinstance(clicked, dict) else None
+            log(f"[表情] 元素内派发失败({why}), 退回坐标点击", level="WARN")
+            synthetic_click_at(page, target["x"], target["y"])
+        else:
+            log(f"[表情] 已在表情项上派发点击: ({clicked['x']},{clicked['y']})")
         # 点击本身不是证据(没抛异常≠发出去了), verified 只能是 None
         events.emit(
             "sticker",

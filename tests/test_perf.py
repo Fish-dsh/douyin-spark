@@ -268,12 +268,19 @@ class TestLowLocksProductionLiterals(unittest.TestCase):
         "screenshot_ms": 15000,
     }
 
+    # 2026-11-19 之后新增的 knob: 只许**增加**, 不许改已有项的数值。
+    # 每加一项必须在这里列名, 否则 test_low_equals_legacy 会拦下 —— 这条断言的作用
+    # 是逼作者显式声明「我动了生产档位表」, 而不是让表悄悄长出新条目。
+    ADDED_AFTER_LEGACY: ClassVar[set[str]] = {"send_confirm_ms"}
+
     def test_low_equals_legacy(self):
         low = perf._SPECS["low"]
         for knob, value in self.LEGACY.items():
             self.assertEqual(low[knob], value, knob)
         self.assertEqual(low["send_gap_ms"], (500, 1200))  # 原 _SEND_GAP_RANGE 秒值
-        self.assertEqual(set(low), set(self.LEGACY) | {"send_gap_ms"})
+        self.assertEqual(
+            set(low), set(self.LEGACY) | {"send_gap_ms"} | self.ADDED_AFTER_LEGACY
+        )
 
     def test_low_matches_runtime_get(self):
         old = perf.active_profile()
@@ -361,9 +368,15 @@ class TestFriendSleepBudget(unittest.TestCase):
     """friend_sleep_ms 是「档位到底省了多少」的唯一可判定口径。"""
 
     def test_low_matches_legacy_literal_sum(self):
-        """low 必须等于 2026-11-01 前的原有 sleep 之和(逐项复原, 不许漂移)。"""
+        """low 必须等于原有 sleep 之和(逐项复原, 不许漂移)。
+
+        2026-11-19 加了一项 send_confirm_ms(700): 合成点击发送后要等输入框清空/
+        气泡出现, 是**无条件付**的固定等待, 按定义必须计入 —— 但它不参与「不许漂移」
+        的历史基线, 故在此单列并写明来源, 而不是把它塞进前六项里混淆口径。
+        """
         legacy = 200 * 1 + 700 * 2 + 300 * 2 + 600 * 1 + 300 * 1 + 250 * 1
-        self.assertEqual(perf.friend_sleep_ms("low"), legacy)
+        added = 700 * 1  # send_confirm_ms, 2026-11-19
+        self.assertEqual(perf.friend_sleep_ms("low"), legacy + added)
 
     def test_monotonic_across_profiles(self):
         low, mid, high = (perf.friend_sleep_ms(p) for p in perf.PROFILES)

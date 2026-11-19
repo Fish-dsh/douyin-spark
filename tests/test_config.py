@@ -17,10 +17,12 @@ from src.config import (
     RUNTIME_DIR,
     SEND_STICKER,
     STATE_FILE,
+    ConfigError,
     in_window,
     load_config,
     load_env,
     load_state,
+    preflight,
     write_state,
 )
 
@@ -370,6 +372,36 @@ class TestPerfProfileNormalization(unittest.TestCase):
 
     def test_unknown_falls_back_to_low(self):
         self.assertEqual(self._load(self._base("turbo"))["perf_profile"], "low")
+
+
+class TestPreflight(unittest.TestCase):
+    """2026-11-02 事故门禁: 配置缺到跑下去也没意义时必须硬失败, 不许 rc=0 静默。"""
+
+    def test_empty_accounts_raises(self):
+        with self.assertRaises(ConfigError) as cm:
+            preflight({"accounts": []})
+        self.assertIn("accounts", str(cm.exception))
+
+    def test_missing_accounts_raises(self):
+        with self.assertRaises(ConfigError):
+            preflight({})
+
+    def test_account_not_dict_raises(self):
+        with self.assertRaises(ConfigError) as cm:
+            preflight({"accounts": ["main"]})
+        self.assertIn("accounts[0]", str(cm.exception))
+
+    def test_account_without_name_raises(self):
+        with self.assertRaises(ConfigError) as cm:
+            preflight({"accounts": [{"storage_file": "s.json"}]})
+        self.assertIn("name", str(cm.exception))
+
+    def test_blank_name_raises(self):
+        with self.assertRaises(ConfigError):
+            preflight({"accounts": [{"name": "   "}]})
+
+    def test_good_config_passes(self):
+        preflight({"accounts": [{"name": "main"}, {"name": "ACCOUNT_B"}]})
 
 
 class TestEnvPath(unittest.TestCase):

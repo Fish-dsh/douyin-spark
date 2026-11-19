@@ -7,7 +7,7 @@
 | 字段 | 默认 | 说明 |
 | ---- | ---- | ---- |
 | `send_window` | `23:30`–`00:30` | 允许自动开始的时间窗（**本地时**），只约束开始时刻 |
-| `accounts` | 1 个 `main` | 多账号：每项含 `name` / `storage_file` / `state_file`，可加 `account` / `password` |
+| `accounts` | 1 个 `main` | 多账号：每项含 `name` / `storage_file` / `state_file`，可加 `account` / `password`。**不能为空**：`src/config.py::preflight()` 会拦下空列表、非对象条目、缺 `name` 的条目，退出码 5（见 [operations.md](operations.md) 的退出码一节） |
 | `auto_login` | `true` | 登录态失效时用 `accounts` 里的账号密码重登（**凭据来自 config.json，不是 .env**） |
 | `headless` | `false` | **必须为 false**。抖音会拦无头；弱机无头渲染容易挂死 |
 | `display` | `:99` | Xvfb 虚拟显示编号 |

@@ -26,6 +26,32 @@ class TestPasswordInputSelectors(unittest.TestCase):
         self.assertIn("input[class*='password']", PASSWORD_INPUT_SELECTORS)
 
 
+class TestCandidateHomes(unittest.TestCase):
+    """浏览器装在「跑安装命令那个用户」的家目录下, 所以要多看几个家目录。
+
+    公开版不能再写死某个机房的家目录(那是我这台机器的现场), 但也不能只看当前
+    用户 —— sudo 装一次、普通用户跑 cron 是最常见的踩坑法。"""
+
+    def test_current_home_first(self):
+        homes = login._candidate_homes()
+        self.assertTrue(homes)
+        self.assertEqual(homes[0], str(__import__("pathlib").Path.home()))
+
+    def test_sudo_user_resolved_to_absolute_home(self):
+        with patch.dict("os.environ", {"SUDO_USER": "deployer"}):
+            homes = login._candidate_homes()
+        self.assertIn("/home/deployer", homes)
+
+    def test_sudo_user_with_absolute_path_kept(self):
+        with patch.dict("os.environ", {"SUDO_USER": "/srv/app"}):
+            homes = login._candidate_homes()
+        self.assertIn("/srv/app", homes)
+
+    def test_no_duplicates(self):
+        homes = login._candidate_homes()
+        self.assertEqual(len(homes), len(set(homes)))
+
+
 class TestAutoLoginStoragePath(unittest.TestCase):
     """auto_login 应接受 storage_path 并传递给 save_state。"""
 

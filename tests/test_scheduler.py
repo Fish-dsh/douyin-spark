@@ -1624,6 +1624,35 @@ class TestPidLockExemption(unittest.TestCase):
             run()
         self.assertEqual(ctx.exception.code, 4)
 
+    def test_run_exits_5_when_accounts_empty(self):
+        """2026-11-02 事故: 空 accounts 曾经只 log 一句就 return(rc=0), 整晚发 0 个
+        好友而 health_check 判健康。现在必须硬失败 rc=5, run_cron.sh 对它不重试。"""
+        with (
+            patch.object(
+                _scheduler_mod, "load_config", return_value={"accounts": []}
+            ),
+            patch.object(_scheduler_mod, "in_window", return_value=True),
+            patch.object(sys, "argv", ["spark.py", "--dry-run", "--no-jitter"]),
+            self.assertRaises(SystemExit) as ctx,
+        ):
+            run()
+        self.assertEqual(ctx.exception.code, 5)
+
+    def test_run_exits_5_when_account_missing_name(self):
+        """条目缺 name 也拦: 那种账号会被写进 state_None.json, 每晚静默错位。"""
+        with (
+            patch.object(
+                _scheduler_mod,
+                "load_config",
+                return_value={"accounts": [{"storage_file": "s.json"}]},
+            ),
+            patch.object(_scheduler_mod, "in_window", return_value=True),
+            patch.object(sys, "argv", ["spark.py", "--dry-run", "--no-jitter"]),
+            self.assertRaises(SystemExit) as ctx,
+        ):
+            run()
+        self.assertEqual(ctx.exception.code, 5)
+
 
 class TestHeartbeat(unittest.TestCase):
     """业务心跳(2026-10-06, ChatGPT round-2 ④): 每个业务事件敲一次 heartbeat.json,

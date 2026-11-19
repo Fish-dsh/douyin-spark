@@ -14,7 +14,8 @@
 3. **不碰验证码**。`src/stealth.py` 只伪装自动化特征（`navigator.webdriver` 之类），撞到滑块就退避等下一晚。
 4. **不做协议逆向**。火花天数走 WebSocket 二进制 protobuf，`src/net_sniff.py` 只是诊断金丝雀，不要把它变成主策略。
 5. **时间预算是三联的**：`run_cron.sh` 的 `timeout 90m` ↔ 硬截止 `_HARD_STOP_MIN=95`（01:35）↔ 巡检 cron 01:45。改一个必须回头看另外两个，否则会出现"任务跑到巡检之后，整晚没人判定"。
-6. **退出码是外部契约**：0 完成/无待续/窗口外、1 一般异常、2 未登录、3 需冷启动重跑、4 未拿到 PID 锁（**不得当成功**）、124 超时被杀、130 人工中断。`run_cron.sh` 按它分流，别在 `spark.py` 里随手改。
+6. **点击一律先走 JS 合成事件**（`src/sender.py::synthetic_click` / `synthetic_click_at`）。2026-11-02 板端实测：无窗口管理器的 Xvfb 上 Playwright 的 `mouse.click` / `locator.click` / `keyboard.*` **全部无效**（点发送键连请求都没有、点表情键面板不弹）。合成点击排第一，但**派发成功 ≠ 操作成功**：发送必须复核「输入框已清空」，表情必须复核「面板已打开 / 列表多了气泡」。
+7. **退出码是外部契约**：0 完成/无待续/窗口外、1 一般异常、2 未登录、3 需冷启动重跑、4 未拿到 PID 锁（**不得当成功**）、5 配置不可用（`accounts` 空/条目缺 `name`，由 `src/config.py::preflight()` 抛 `ConfigError`）、124 超时被杀、130 人工中断。`run_cron.sh` 按它分流，别在 `spark.py` 里随手改。
 
 ## 仓库地图
 
