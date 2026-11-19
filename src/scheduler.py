@@ -395,29 +395,17 @@ def _page_usable(page) -> bool:
 _IDENTITY_STRICT = False
 
 
-def process_friend(
-    page, account: dict, name: str, dry_run: bool, *, parent: str | None = None
-) -> tuple[str, bool]:
-    # 复用上一个好友的页面时, 身份核对「读不到」不许放行: 右栏可能还是上一位,
-    # 半渲染瞬间放行 = 把消息发给不确定的人。由 _send_phase 按本轮是否复用设置。
-    strict_identity = _IDENTITY_STRICT
-    """处理单个好友; 返回 (状态, 是否已发送)。状态: ok / fail / logged_out"""
-    acc_name = account.get("name", "?") if isinstance(account, dict) else "?"
-    # a0 是本好友这一轮的根 attempt: 表情→文字→视觉→自愈重跑 全部挂在它下面
-    a0 = parent or events.attempt_id()
-    log(f"======== 处理好友: {name} (账号 {acc_name}) ========")
-    events.emit(
-        "task",
-        "friend_start",
-        "ok",
-        friend=name,
-        account=acc_name,
-        attempt=a0,
-    )
-    log(f"[debug] process_friend 开始: {name}")
-    _heartbeat(f"friend_start:{name}", acc_name, name)
-    _t0 = time.monotonic()
+def _log_friend_done(name: str, t0: float) -> None:
+    """每个出口都打一行耗时, 否则 [timing] 只剩成功路径, 失败的耗时看不见。"""
+    log(f"[timing] process_friend({name}) 耗时 {_fmt_duration(time.monotonic() - t0)}")
 
+
+def _open_friend_chat(page, name: str, dry_run: bool, t0: float):
+    """打开聊天页 → 确认登录 → 等列表 → 定位好友。
+
+    返回 None 表示可以继续发送; 否则返回的就是 process_friend 的结果
+    ("logged_out"/"fail"/dry-run 的 "ok")。
+    """
     try:
         # 性能(2026-11-01): 旧实现每个好友都整页 goto 一次, 板端实测每次重载
         # + 恢复登录态 + 等列表 ≈ 30s, 9 个好友就是 4-5 分钟纯等待; 而会话列表
@@ -438,17 +426,13 @@ def process_friend(
 
         if not is_logged_in(page, quick=True):
             log("[登录] 会话已失效, 终止后续好友")
-            log(
-                f"[timing] process_friend({name}) 耗时 {_fmt_duration(time.monotonic() - _t0)}"
-            )
+            _log_friend_done(name, t0)
             return "logged_out", False
         list_ok = wait_chat_list(page)
     except Exception as exc:
         log(f"[错误] 打开聊天页失败: {exc}")
         dump_page(page)
-        log(
-            f"[timing] process_friend({name}) 耗时 {_fmt_duration(time.monotonic() - _t0)}"
-        )
+        _log_friend_done(name, t0)
         return "fail", False
 
     if not list_ok:
@@ -474,18 +458,18 @@ def process_friend(
             log(f"[重试] 重载失败: {exc}")
     if clicked is None:
         log(f"[失败] 未能定位到好友『{name}』, 跳过该好友")
-        log(
-            f"[timing] process_friend({name}) 耗时 {_fmt_duration(time.monotonic() - _t0)}"
-        )
+        _log_friend_done(name, t0)
         return "fail", False
 
     if dry_run:
         log(f"[dry-run] 『{name}』定位链路 OK, 未真正发送 (如需发送请去掉 --dry-run)")
-        log(
-            f"[timing] process_friend({name}) 耗时 {_fmt_duration(time.monotonic() - _t0)}"
-        )
+        _log_friend_done(name, t0)
         return "ok", False
+    return None
 
+
+def _await_chat_panel(page, name: str) -> bool:
+    """等会话面板(唯一的 contenteditable)挂载, 可信点击不挂就合成点击抢救一次。"""
     # 性能(2026-11-01): 首段等待 15s 太长。板端实测(下午探针)可信点击有时根本
     # 不打开面板, 而合成点击 1s 内就能打开 —— 白等 12.5s/好友。改为首段 2.5s
     # (SPARK_PANEL_WAIT_MS 可调), 未挂载立刻合成点击抢救, 第二段仍等 15s。
@@ -499,6 +483,7 @@ def process_friend(
         page.wait_for_selector(
             '[contenteditable="true"]', state="visible", timeout=_panel_wait_ms()
         )
+        return True
     except Exception:
         hit = synthetic_click_row(page, name)
         if hit:
@@ -514,19 +499,22 @@ def process_friend(
                 state="visible",
                 timeout=perf.ms("contenteditable_ms"),
             )
+            return True
         except Exception:
             log(
                 f"[失败] 『{name}』会话面板两次等待"
                 f"({_panel_wait_ms() / 1000:.1f}s+{perf.ms('contenteditable_ms') / 1000:.1f}s)"
                 f"均未挂载, 快速失败不盲发"
             )
-            log(
-                f"[timing] process_friend({name}) 耗时 {_fmt_duration(time.monotonic() - _t0)}"
-            )
-            return "fail", False
+            return False
 
+
+def _verify_friend_identity(
+    page, name: str, acc_name: str, a0: str, strict: bool
+) -> tuple[bool, str]:
+    """发送前核对右栏是不是这个人; 冲突时向会话行合成点击再复检一次。"""
     # 身份核对: 骨架期(读不到)先复检再裁决, 见 sender.verify_chat_opened_ready。
-    ok_id, id_detail = verify_chat_opened_ready(page, name, strict=strict_identity)
+    ok_id, id_detail = verify_chat_opened_ready(page, name, strict=strict)
     log(f"[核对] {id_detail}")
     events.emit(
         "identity",
@@ -539,34 +527,30 @@ def process_friend(
         error_class=None if ok_id else "identity_conflict",
         extra={"detail": id_detail[:80]},
     )
-    if not ok_id:
-        # 性能(2026-11-01): 复用页面时, 上一个好友的会话面板可能还挂在右栏,
-        # 此时可信点击没生效 → 身份核对看到的是"上一个好友" → 判冲突。板端探针
-        # 实测合成点击能可靠切换会话, 故冲突时先抢救一次(最多一次, 不循环)。
-        hit = synthetic_click_row(page, name)
-        if hit:
-            log(f"[重试] 身份核对未通过, 已向会话行合成点击 {hit}, 再复检一次")
-            try:
-                page.wait_for_selector(
-                    '[contenteditable="true"]',
-                    state="visible",
-                    timeout=perf.ms("contenteditable_retry_ms"),
-                )
-            except Exception:
-                log("[重试] 合成点击后仍无会话面板")
-            ok_id, id_detail = verify_chat_opened_ready(
-                page, name, strict=strict_identity
-            )
-            log(f"[重试] 复检: {id_detail}")
-
-    if not ok_id:
-        log(f"[失败] 『{name}』发送前身份核对未通过, 跳过(不盲发)")
-        log(
-            f"[timing] process_friend({name}) 耗时 {_fmt_duration(time.monotonic() - _t0)}"
+    if ok_id:
+        return True, id_detail
+    # 性能(2026-11-01): 复用页面时, 上一个好友的会话面板可能还挂在右栏,
+    # 此时可信点击没生效 → 身份核对看到的是"上一个好友" → 判冲突。板端探针
+    # 实测合成点击能可靠切换会话, 故冲突时先抢救一次(最多一次, 不循环)。
+    hit = synthetic_click_row(page, name)
+    if not hit:
+        return False, id_detail
+    log(f"[重试] 身份核对未通过, 已向会话行合成点击 {hit}, 再复检一次")
+    try:
+        page.wait_for_selector(
+            '[contenteditable="true"]',
+            state="visible",
+            timeout=perf.ms("contenteditable_retry_ms"),
         )
-        return "fail", False
+    except Exception:
+        log("[重试] 合成点击后仍无会话面板")
+    ok_id, id_detail2 = verify_chat_opened_ready(page, name, strict=strict)
+    log(f"[重试] 复检: {id_detail2}")
+    return ok_id, id_detail2
 
-    # 固定发送"续火花": 优先表情包, 失败以文字兜底。
+
+def _deliver(page, name: str, acc_name: str, a0: str, t0: float) -> tuple[str, bool]:
+    """固定发送「续火花」: 表情包 → 文字兜底 → 视觉兜底, 逐级降级。"""
     log(f"[发送] 模式: 表情包 ({SEND_STICKER})")
     a_sticker = events.attempt_id()
     sent, method = send_sticker(
@@ -589,9 +573,7 @@ def process_friend(
         extra={"method": method[:60]},
     )
     if sent:
-        log(
-            f"[timing] process_friend({name}) 耗时 {_fmt_duration(time.monotonic() - _t0)}"
-        )
+        _log_friend_done(name, t0)
         return "ok", True
     log(f"[失败] 『{name}』表情发送失败, 以文字兜底『{SEND_STICKER}』")
 
@@ -634,9 +616,7 @@ def process_friend(
     )
     log(f"[debug] confirm_send 返回 okc={okc}, detail={detail}")
     if sent and okc:
-        log(
-            f"[timing] process_friend({name}) 耗时 {_fmt_duration(time.monotonic() - _t0)}"
-        )
+        _log_friend_done(name, t0)
         return "ok", True
     log(f"[失败] 『{name}』发送未确认成功")
     # Emergency Visual Fallback: 表情+文字各发送层全失败(=本来就要失败)时,
@@ -647,13 +627,48 @@ def process_friend(
     )
     if ok_cv:
         log(f"[发送] 视觉兜底救回: {cv_detail}")
-        log(
-            f"[timing] process_friend({name}) 耗时 {_fmt_duration(time.monotonic() - _t0)}"
-        )
+        _log_friend_done(name, t0)
         return "ok", True
     log(f"[失败] 『{name}』视觉兜底也未成功: {cv_detail}")
-    log(f"[timing] process_friend({name}) 耗时 {_fmt_duration(time.monotonic() - _t0)}")
+    _log_friend_done(name, t0)
     return "fail", False
+
+
+def process_friend(
+    page, account: dict, name: str, dry_run: bool, *, parent: str | None = None
+) -> tuple[str, bool]:
+    """处理单个好友; 返回 (状态, 是否已发送)。状态: ok / fail / logged_out"""
+    # 复用上一个好友的页面时, 身份核对「读不到」不许放行: 右栏可能还是上一位,
+    # 半渲染瞬间放行 = 把消息发给不确定的人。由 _send_phase 按本轮是否复用设置。
+    strict_identity = _IDENTITY_STRICT
+    acc_name = account.get("name", "?") if isinstance(account, dict) else "?"
+    # a0 是本好友这一轮的根 attempt: 表情→文字→视觉→自愈重跑 全部挂在它下面
+    a0 = parent or events.attempt_id()
+    log(f"======== 处理好友: {name} (账号 {acc_name}) ========")
+    events.emit(
+        "task",
+        "friend_start",
+        "ok",
+        friend=name,
+        account=acc_name,
+        attempt=a0,
+    )
+    log(f"[debug] process_friend 开始: {name}")
+    _heartbeat(f"friend_start:{name}", acc_name, name)
+    t0 = time.monotonic()
+
+    stopped = _open_friend_chat(page, name, dry_run, t0)
+    if stopped is not None:
+        return stopped
+    if not _await_chat_panel(page, name):
+        _log_friend_done(name, t0)
+        return "fail", False
+    ok_id, _detail = _verify_friend_identity(page, name, acc_name, a0, strict_identity)
+    if not ok_id:
+        log(f"[失败] 『{name}』发送前身份核对未通过, 跳过(不盲发)")
+        _log_friend_done(name, t0)
+        return "fail", False
+    return _deliver(page, name, acc_name, a0, t0)
 
 
 def has_login_state(account: dict) -> bool:
