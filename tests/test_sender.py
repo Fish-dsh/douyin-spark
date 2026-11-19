@@ -646,15 +646,12 @@ class TestCvSendFallback(unittest.TestCase):
         self.assertIn("cv2", detail)
         self.page.mouse.click.assert_not_called()
 
+    @unittest.skipUnless(vision_cv.available(), "需要 opencv")
     def test_no_editable_aborts(self):
         self.page.evaluate.return_value = None
         ok, detail = cv_send_fallback(self.page, "续火花", "测试好友")
         self.assertFalse(ok)
         self.assertIn("输入框", detail)
-
-
-if __name__ == "__main__":
-    unittest.main()
 
 
 class TestGeometrySendButton(unittest.TestCase):
@@ -973,3 +970,7 @@ class TestInputAssertion(unittest.TestCase):
 
         self.assertTrue(sent, method)
         self.assertIn("策略A", method)
+
+
+if __name__ == "__main__":
+    unittest.main()
