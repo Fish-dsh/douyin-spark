@@ -1374,6 +1374,11 @@ def run() -> None:
                     f"【账号 {account.get('name', idx)} 未配置 account/password 且无登录态, 跳过】"
                 )
         log(f"[timing] 本次运行总耗时 {_fmt_duration(time.monotonic() - _t0_run)}")
+        # 终态心跳(2026-11-02): 在此之前一夜跑完之后心跳停在 account_done 不动,
+        # tools/task_watchdog.py 会把「正常收尾」判成 STALE「心跳已 4213s 没更新」
+        # —— 那是正常结束, 却和真卡死长得一模一样。有了 all_done, 看门狗才能说
+        # 「跑完了」而不是「不动了」。
+        _heartbeat("all_done")
         # 任务收尾事件(2026-11-01): 记下可用内存最低值——以前没人记,
         # 周报只能写"内存未采集"。available_mb() 读不到时返回 None, 事件里如实留空。
         _mem = available_mb()

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 本地一条命令跑完提交前自检: 语法 -> lint -> 单测。
+# 本地一条命令跑完提交前自检: 语法 -> JS 语法 -> lint -> 单测。
 #
 # 为什么是脚本而不是 GitHub Actions: 这个仓库的推送令牌没有 workflow 权限,
 # 往 .github/workflows/ 写文件会被服务端拒掉。所以把验证收敛到本地,
@@ -7,7 +7,7 @@
 #
 # 用法:
 #   tools/verify.sh            # 全跑
-#   tools/verify.sh --fast     # 跳过单测, 只做语法和 lint
+#   tools/verify.sh --fast     # 跳过单测, 只做语法、JS 语法和 lint
 #   PY=/path/to/python tools/verify.sh    # 指定解释器(交叉验证另一版本时用)
 #
 # 退出码: 0 全过 / 1 有检查失败 / 2 没失败但有步骤因缺工具被跳过
@@ -41,8 +41,21 @@ SKIPPED=0
 step() { printf '\n== %s ==\n' "$1"; }
 skip() { echo "跳过: $1"; SKIPPED=$((SKIPPED + 1)); }
 
-step "1/3 语法 (compileall)"
+step "1/4 语法 (compileall)"
 if "$PY" -m compileall -q src tests tools spark.py login.py logutil.py; then
+  echo "OK"
+else
+  echo "FAIL" >&2
+  FAILED=1
+fi
+
+# JS 语法: src/ 里那些三引号 JS 常量只有在浏览器里执行时才暴露语法错,
+# 生产日志里表现为 Page.evaluate: SyntaxError, 本地完全看不见。
+# node 是可选依赖(这不是 Node 项目), 没装记 SKIP, 别记 FAIL。
+step "2/4 JS 语法 (node --check, 可选)"
+if ! command -v node >/dev/null 2>&1; then
+  skip "没装 node (Debian/Ubuntu: sudo apt install nodejs)"
+elif "$PY" tools/check_js.py; then
   echo "OK"
 else
   echo "FAIL" >&2
@@ -51,7 +64,7 @@ fi
 
 # ruff / pytest 属于开发依赖, 干净机器上没装是正常的 —— 那是"没验证到",
 # 报错退出只会让新人以为代码有问题。缺工具记 SKIP, 工具报错才记 FAIL。
-step "2/3 lint (ruff)"
+step "3/4 lint (ruff)"
 if ! "$PY" -c "import ruff" >/dev/null 2>&1 && ! "$PY" -m ruff --version >/dev/null 2>&1; then
   skip "没装 ruff (pip install ruff==0.16.8)"
 elif "$PY" -m ruff check . ; then
@@ -62,10 +75,10 @@ else
 fi
 
 if [ "${1:-}" = "--fast" ]; then
-  step "3/3 单测"
-  skip "--fast 只做语法和 lint"
+  step "4/4 单测"
+  skip "--fast 只做语法、JS 语法和 lint"
 else
-  step "3/3 单测"
+  step "4/4 单测"
   # 优先 pytest, 没装就退回 unittest discover(标准库, 一定在)。
   if "$PY" -c "import pytest" >/dev/null 2>&1; then
     if "$PY" -m pytest tests -q -p no:cacheprovider; then :; else FAILED=1; fi

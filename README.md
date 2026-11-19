@@ -6,7 +6,7 @@
 
 > **免责声明**：本项目为个人自动化实践，与抖音官方无关。自动化操作可能触发平台风控，请自行评估风险并遵守平台协议；由此产生的任何后果由使用者自负。
 
-`Python 3.9+` · `Playwright (Chromium)` · `MIT` · `532 单元测试`
+`Python 3.9+` · `Playwright (Chromium)` · `MIT` · `561 单元测试`
 
 ---
 
@@ -58,7 +58,7 @@ cp .env.example .env && chmod 600 .env         # 只有用密码登录才需要�
 | 今晚到底成没成 | `.venv/bin/python -m src.health_check` |
 | 这周有人断了吗 | `.venv/bin/python -m src.weekly_report` |
 | 本地开发（不碰正式账本） | `./run_dev.sh --dry-run`（自动补 `config.json` 占位） |
-| 提交前自检 | `./tools/verify.sh`（语法 + lint + 单测；`--fast` 只做前两项） |
+| 提交前自检 | `./tools/verify.sh`（语法 + JS 语法 + lint + 单测；`--fast` 只做前三项） |
 
 ## 配置速查
 
@@ -93,6 +93,8 @@ sudo systemctl enable --now xvfb                                         #    �
 #  45 1 * * *  /opt/douyin-spark/.venv/bin/python /opt/douyin-spark/src/health_check.py --quiet --notify-only-on-change
 # 注意：cron 不读 PATH，命令一律写绝对路径；run_cron.sh 必须 chmod +x。
 ```
+
+代码更新有两条路：`SPARK_HOST=USER@HOST ./tools/deploy.sh`（自动备份 + 传完跑冒烟 + 失败回滚），或者手动 `git bundle` / `rsync`。两条路都**不传** `config.json` 与 `runtime/`。
 
 细节（三类东西怎么分开同步、低配机内存优化、Python 版本对齐）见 [部署文档](docs/deployment.md)。
 

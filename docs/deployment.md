@@ -35,10 +35,29 @@
 
 账号需重新登录时，见 `docs/operations.md`「登录管理」。
 
+## 方式 B：`tools/deploy.sh` 一键推代码
+
+先把远端参数说清楚（脚本不含任何写死的机器名）：
+
+```bash
+SPARK_HOST=USER@HOST ./tools/deploy.sh
+```
+
+| 环境变量 | 含义 |
+| -------- | ---- |
+| `SPARK_HOST` | 远端 ssh 目标，支持 `~/.ssh/config` 别名。**必填**，不填脚本直接退出 |
+| `SPARK_REMOTE_DIR` | 远端部署目录，默认 `/opt/douyin-spark` |
+| `SPARK_REMOTE_USER` | 远端跑服务的用户（决定 `chown` 和跑冒烟的身份），默认取本地 `whoami` |
+
+它做的事，按顺序：打包（**排除** `.venv` / `runtime` / `__pycache__` / `.git` / `runtime-dev` / `*.log` / `config.json`）→ ssh 把远端当前代码与 `config.json` 备份到 `/tmp/spark-prev-<时间戳>.tgz` 和 `/tmp/spark-config-<时间戳>.json` → 上传解包并 `chown` → 远端跑冒烟（`load_config()` + `preflight()` + 打印账号名与 `notify_cmd` 是否配了 + `import src.scheduler`）→ 任一步失败自动回滚代码与配置。
+
+为什么冒烟里要跑 `preflight()`：2026-11-02 那次事故就是手写 `tar` 把本地一个 19 字节的 `config.json` 桩打进去，覆盖掉部署机真正的配置 —— `accounts` 空着，整晚发 0 个好友却返回 `rc=0`，巡检判健康、告警通道也没配，静默断火一整晚。现在 `accounts` 空 / 条目缺 `name` 会抛 `ConfigError`，退出码 5。
+
+> `deploy.sh` **只传代码**。登录态（`runtime/storage.json`）和 `config.json` 的账号密码各机独立，见上面方式 A 的第 3、4 步。
+
 ## 手动部署步骤
 
-> 一键部署脚本已弃用并移除，当前按以下手动步骤部署：
-> 部署完逐项核对：代码同步（`git status` 应为干净）／时区（`timedatectl` 应为 Asia/Shanghai）／健康检查 cron（01:45）／当晚真机跑一次看日志收尾。
+> 不想用脚本就按下面手动走。部署完逐项核对：代码同步（`git status` 应为干净）／时区（`timedatectl` 应为 Asia/Shanghai）／健康检查 cron（01:45）／当晚真机跑一次看日志收尾。
 
 1. 依赖（**分两步，只有第一步要 sudo**）：
    ```bash

@@ -69,6 +69,18 @@ class TestClassify(unittest.TestCase):
         )
         self.assertEqual(status, "HEALTHY", detail)
 
+    def test_all_done_is_healthy_not_stale(self):
+        """2026-11-02 板端误报: 00:09 收尾, 01:20 看门狗判 STALE「4213s 没更新」。
+
+        跑完不等于卡死。scheduler 收尾前敲 all_done, 心跳停在这一档必须判健康,
+        否则每个正常夜晚都会在 01:20 收到一次假告警 —— 假告警一多, 真告警就没人看。
+        """
+        status, detail = tw.classify(
+            _hb(stage="all_done", age_sec=3600, now=self.now), self.now
+        )
+        self.assertEqual(status, "HEALTHY", detail)
+        self.assertIn("收尾", detail)
+
     def test_allowance_lookup(self):
         self.assertEqual(tw._allowance("friend_start:张三"), 10 * 60)
         self.assertEqual(tw._allowance("account_start:main"), 40 * 60)

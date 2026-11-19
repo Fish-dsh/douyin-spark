@@ -104,6 +104,11 @@ def classify(hb: dict | None, now: datetime) -> tuple[str, str]:
     if stage == "run_start" and age <= JITTER_MAX_SEC + 120:
         return "HEALTHY", f"抖动中(run_start {int(age)}s)"
 
+    # 终态:整轮跑完(scheduler 在 finally 前敲 all_done)。心跳停在这里是**正常**
+    # 而不是卡死 —— 2026-11-02 板端: 00:09 收尾, 01:20 被误判 STALE 4213s。
+    if stage == "all_done":
+        return "HEALTHY", f"本轮已正常收尾(心跳 {int(age)}s 前)"
+
     stage_ts = hb.get("stage_start_ts")
     try:
         stage_age = now.timestamp() - float(stage_ts) if stage_ts else age

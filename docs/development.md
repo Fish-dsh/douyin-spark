@@ -18,22 +18,25 @@ python3 -m venv .venv
 
 ## 跑测试
 
-一条命令跑完全部自检（语法 → lint → 单测）：
+一条命令跑完全部自检（语法 → JS 语法 → lint → 单测）：
 
 ```bash
 ./tools/verify.sh           # 全跑
-./tools/verify.sh --fast    # 只做语法 + lint
+./tools/verify.sh --fast    # 只做语法、JS 语法和 lint
 make verify                 # 等价，装了 make 就能用
 PY=/usr/bin/python3.11 ./tools/verify.sh   # 换一个解释器交叉验证
 ```
 
-退出码分三种：`0` 全过；`1` 有检查真失败；`2` **没有失败但有步骤被跳过**（干净机器上没装 ruff / 用了 `--fast` 就属于这类）。`2` 不是绿 —— 它表示「没验证到」，别在脚本里把它当通过。
+退出码分三种：`0` 全过；`1` 有检查真失败；`2` **没有失败但有步骤被跳过**（干净机器上没装 ruff 或 node / 用了 `--fast` 就属于这类）。`2` 不是绿 —— 它表示「没验证到」，别在脚本里把它当通过。
+
+第 2 步 `tools/check_js.py` 值得单独说一句：`src/` 里大量 JS 是写在 Python 三引号里的字符串，语法错只有在浏览器里 `page.evaluate` 执行时才炸，生产日志里表现为 `Page.evaluate: SyntaxError`，本地单测和 `compileall` 都看不见。这个脚本用 `ast` 把那些常量抠出来交给 `node --check`，一次扫 24 段左右。node 不是本项目的依赖（这不是 Node 项目），没装就跳过该步。
 
 分开跑也行：
 
 ```bash
 .venv/bin/python -m unittest discover -s tests -v
 .venv/bin/ruff check .
+.venv/bin/python tools/check_js.py     # 需要 node
 ```
 
 多数用例用桩数据驱动选择器/DOM，不需要真浏览器；涉及 Playwright 的用例要先 `playwright install chromium`。
@@ -54,7 +57,7 @@ PY=/usr/bin/python3.11 ./tools/verify.sh   # 换一个解释器交叉验证
 
 ## 提交前自检
 
-1. `./tools/verify.sh` 通过（依次是 `compileall`、`ruff check .`、单测；涉及浏览器的用例允许在无浏览器环境下 skip）。
+1. `./tools/verify.sh` 通过（依次是 `compileall`、`tools/check_js.py` 的 `node --check`、`ruff check .`、单测；涉及浏览器的用例允许在无浏览器环境下 skip）。
 2. 改了日志文案/退出码/配置字段的，同步改 `docs/` 里对应那篇（退出码在 `operations.md`，配置在 `configuration.md`）。
 
 > 这个仓库**没有远端 CI**（推送令牌没有 workflow 权限，往 `.github/workflows/` 写文件会被 GitHub 拒掉），所以 `tools/verify.sh` 是唯一闸门。想要推送前自动拦一道，`git config core.hooksPath .githooks` 开一次 pre-push 钩子（钩子不随 clone 自动生效，也能被 `--no-verify` 绕过，只是提醒）。

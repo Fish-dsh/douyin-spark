@@ -26,6 +26,8 @@ douyin-spark/
 ├── config.example.json / config.dev.json / .env.example
 ├── src/                               # 全部业务逻辑（见 docs/architecture.md 的模块表）
 ├── tools/                             # 运维脚本，不参与发送主链路
+│                                      # verify.sh 自检 / check_js.py JS 语法
+│                                      # deploy.sh 推代码 / task_watchdog.py 看门狗
 ├── tests/                             # unittest 全量测试
 ├── docs/                              # architecture / configuration / deployment / operations / self-heal / development
 └── runtime/                           # 运行时生成物（gitignored）
@@ -36,7 +38,9 @@ douyin-spark/
 ## 常用命令
 
 ```bash
-python -m compileall -q src tests tools spark.py login.py logutil.py   # 语法自检（先跑这个）
+./tools/verify.sh                                                     # 一并跑: 语法 + JS 语法 + ruff + 单测
+python -m compileall -q src tests tools spark.py login.py logutil.py   # 语法自检（单独跑时先跑这个）
+.venv/bin/python tools/check_js.py                                    # JS 常量语法（需要 node）
 .venv/bin/python -m unittest discover -s tests -v                     # 全量测试
 .venv/bin/ruff check .                                                # 静态检查
 .venv/bin/python spark.py --dry-run                                   # 演练：只走定位链路，不真发
@@ -47,7 +51,8 @@ python -m compileall -q src tests tools spark.py login.py logutil.py   # 语法�
 
 ## 改动约定
 
-- 改完先 `compileall`，再跑 `unittest`；涉及 DOM 选择的改动，说明清楚用哪条策略兜底。
+- 改完先跑 `./tools/verify.sh`（语法 → JS 语法 → ruff → 单测）；涉及 DOM 选择的改动，说明清楚用哪条策略兜底。
+- 改了 `src/` 里写的 JS（`page.evaluate` 那些三引号常量）必须过 `tools/check_js.py`：这类语法错 `compileall` 看不见、单测用 mock 也看不见，只有生产日志里才有 `Page.evaluate: SyntaxError`。
 - 新增等待/超时不要写字面量，加到 `src/perf.py` 的 `_SPECS`，由 `perf_profile` 统管（可用 `SPARK_PERF_<KNOB>` 临时覆盖）。
 - 新增配置字段要同时改：`config.example.json`、`src/config.py`、`docs/configuration.md`；改运行时机还要改 `docs/operations.md` 的四方一致那节。
 - 日志用中文、面向"明天早上看日志的人"；机器读的内容一律进 `src/events.py` 的 JSONL，不要混进日志。
