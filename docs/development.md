@@ -25,6 +25,8 @@ python3 -m venv .venv
 
 多数用例用桩数据驱动选择器/DOM，不需要真浏览器；涉及 Playwright 的用例要先 `playwright install chromium`。
 
+没装 opencv-python-headless 也能跑：需要真画图的几条（tests/test_vision_cv.py、tests/test_sender.py 里标了 skipUnless(vision_cv.available()) 的）会自己 skip，剩下的全过——这也顺带验证了 opencv 确实只是可选依赖。装了只会多跑几条，不会挂。
+
 ## 本地开发入口
 
 `./run_dev.sh --dry-run` 读 `config.dev.json`（`extends: config.json` + `perf_profile: high` + `headless: false` + `display: null`），把日志、登录态、账本全落到 `runtime-dev/`，不碰正式 `runtime/`。
