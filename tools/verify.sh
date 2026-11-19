@@ -87,7 +87,9 @@ else
   if "$PY" -c "import pytest" >/dev/null 2>&1; then
     if "$PY" -m pytest tests -q -p no:cacheprovider; then :; else FAILED=1; fi
   else
-    echo "提示: 没装 pytest, 退回 unittest discover(等价覆盖, 输出更啰嗦)"
+    # 别写成"等价覆盖": unittest discover 只跑 unittest.TestCase,
+    # tests/ 里有些用例是 pytest 风格的, 退回这条会静默少跑。
+    echo "提示: 没装 pytest, 退回 unittest discover(标准库测试子集, pytest 风格用例不会跑到)"
     if "$PY" -m unittest discover -s tests; then :; else FAILED=1; fi
   fi
 fi

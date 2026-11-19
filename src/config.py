@@ -140,28 +140,62 @@ ALLOW_HEADLESS_ENV = "SPARK_ALLOW_HEADLESS"
 _DISPLAY_RE = re.compile(r"^:\d+(\.\d+)?$")
 
 
-def headless_refusal(cfg: dict) -> str:
-    """返回「为什么这份配置在无人值守下不能跑」; 可跑则返回空串。
+def _env_display() -> str:
+    """当前 shell 的 DISPLAY; 不是合法的 :N 形式就当没有。
 
-    校验两件事, 缺一不可:
-      1. headless 不能是 true —— 抖音会给 headless chromium 弹拦截页, 弱机
-         还会渲染挂死(2026-09-30 事故: 当晚全部好友 skip 漏发)。
-      2. display 必须是 :N 形式 —— 有头模式没有 X 显示就是开一个渲染不出东西
-         的浏览器; 之前只判「display 是否为真值」, 于是 ":88" 这种写错的
-         显示号也能过闸门, 而板上只有 :99 一个 Xvfb。
+    只读环境变量, **不探测 X server 是否真在** —— 配置层不该去连显示服务。
+    「这个显示号能不能真连上」由 src/health_check.py::check_xvfb_display 查
+    /tmp/.X11-unix 里的 socket 负责。
     """
-    if cfg.get("headless") is not False:
-        return (
-            f"headless={cfg.get('headless')!r}; 无人值守必须 headless=false。"
-            f"桌面临时调试请显式设置 {ALLOW_HEADLESS_ENV}=1 再跑。"
-        )
+    raw = (os.environ.get("DISPLAY") or "").strip()
+    return raw if _DISPLAY_RE.match(raw) else ""
+
+
+def _display_refusal(cfg: dict) -> str:
+    """只校验 display 一项; 没问题返回空串。
+
+    拆出来是为了让 SPARK_ALLOW_HEADLESS 逃生口能「只跳过 headless 那一条,
+    display 该查照查」—— 以前逃生口一开就整段 return, 连 display 一起放过。
+    """
     display = cfg.get("display")
+    if display is None or (isinstance(display, str) and not display.strip()):
+        if _env_display():
+            return ""
+        return (
+            "display 未配置, 当前环境也没有可用的 DISPLAY; 有头模式需要一个 X 显示。"
+            '无人值守请写 display=":99"(板端对应 systemd 的 xvfb.service);'
+            " 桌面调试请在真有桌面的会话里跑, 那时 DISPLAY 通常是 :0。"
+        )
     if not isinstance(display, str) or not _DISPLAY_RE.match(display.strip()):
         return (
             f'display={display!r}; 有头模式必须给一个 X display, 形如 ":99"'
             "(板端对应 systemd 的 xvfb.service)。"
         )
     return ""
+
+
+def headless_refusal(cfg: dict) -> str:
+    """返回「为什么这份配置在无人值守下不能跑」; 可跑则返回空串。
+
+    校验两件事, 缺一不可:
+      1. headless 不能是 true —— 抖音会给 headless chromium 弹拦截页, 弱机
+         还会渲染挂死(2026-09-30 事故: 当晚全部好友 skip 漏发)。
+      2. display 必须能落实到一个 X 显示 —— 有头模式没有 X 显示就是开一个渲染
+         不出东西的浏览器; 之前只判「display 是否为真值」, 于是 ":88" 这种写错
+         的显示号也能过闸门, 而板上只有 :99 一个 Xvfb。
+
+    display 缺省(null / 空串)是**合法**的, 含义是「用当前 shell 的 DISPLAY」
+    —— 开发机的常态(桌面会话里是 :0)。但它只在环境里真有显示号时才成立:
+    这道闸门要证明的是「这台机器确实有个 X 显示」, 而不是「配置里有个字符串」。
+    以前把 null 一律判错, 于是 config.dev.json 一启动就撞自己的门禁; 反过来若
+    一律放行 null, 板上 config.json 丢了 display 键又会静默跑成无显示。
+    """
+    if cfg.get("headless") is not False:
+        return (
+            f"headless={cfg.get('headless')!r}; 无人值守必须 headless=false。"
+            f"桌面临时调试请显式设置 {ALLOW_HEADLESS_ENV}=1 再跑。"
+        )
+    return _display_refusal(cfg)
 
 
 def preflight(cfg: dict) -> None:
@@ -187,11 +221,17 @@ def preflight(cfg: dict) -> None:
             raise ConfigError(f"accounts[{i}] 不是对象: {acc!r}")
         if not str(acc.get("name") or "").strip():
             raise ConfigError(f"accounts[{i}] 没有 name 字段")
-    if os.environ.get(ALLOW_HEADLESS_ENV) == "1":
+    # 逃生口只对「headless=true」这一件事生效。以前的写法是见到这个变量就整段
+    # return, 连 display 校验一起跳过 —— 于是 SPARK_ALLOW_HEADLESS=1 下写
+    # display=":abc" 也能启动, 而变量名表达的只是「允许 headless」。
+    if os.environ.get(ALLOW_HEADLESS_ENV) == "1" and cfg.get("headless") is not False:
         log(
-            f"[preflight] {ALLOW_HEADLESS_ENV}=1, 跳过有头模式硬门禁"
-            "(只适用于桌面临时调试)"
+            f"[preflight] {ALLOW_HEADLESS_ENV}=1, 跳过 headless 硬门禁"
+            "(只适用于桌面临时调试; display 仍按有头模式校验)"
         )
+        problem = _display_refusal(cfg)
+        if problem:
+            raise ConfigError(f"有头模式硬门禁未通过: {problem}")
         return
     reason = headless_refusal(cfg)
     if reason:

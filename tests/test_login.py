@@ -278,6 +278,69 @@ class TestPrepareDisplay(unittest.TestCase):
         ok, _ = self._run(None, True)
         self.assertFalse(ok)
 
+    def test_malformed_explicit_display_is_refused(self):
+        """--display 99 / --display /tmp/.X11-unix/X99 都是常见手误。
+
+        以前只判"有没有传值", 于是这类值会被原样写进 DISPLAY 交给浏览器,
+        报出来的是底层连接错误, 与"参数写错"隔了好几层。
+        """
+        for bad in ("99", "/tmp/.X11-unix/X99", ":abc", "localhost:99", ":"):
+            with self.subTest(display=bad):
+                ok, out = self._run(bad, True)
+                self.assertFalse(ok)
+                self.assertIn("显示号", out)
+
+    def test_screen_suffix_is_accepted(self):
+        ok, _ = self._run(":99.0", True)
+        self.assertTrue(ok)
+        self.assertEqual(os.environ["DISPLAY"], ":99.0")
+
+    def test_malformed_env_display_is_refused(self):
+        """环境里的 DISPLAY 也可能是手误, 不能在"有值"这一步就放行。"""
+        for bad in ("99", "localhost:0", ":"):
+            with self.subTest(display=bad):
+                os.environ["DISPLAY"] = bad
+                ok, out = self._run(None, True)
+                self.assertFalse(ok)
+                self.assertIn("显示号", out)
+
+
+class TestDisplayFlagParsing(unittest.TestCase):
+    """--display 的值在参数解析阶段就要拒掉, 不能拖到浏览器启动。"""
+
+    def setUp(self):
+        self._saved = os.environ.pop("DISPLAY", None)
+
+    def tearDown(self):
+        os.environ.pop("DISPLAY", None)
+        if self._saved is not None:
+            os.environ["DISPLAY"] = self._saved
+
+    def _main(self, argv):
+        buf = io.StringIO()
+        with (
+            contextlib.redirect_stdout(buf),
+            patch.object(login.sys, "argv", ["login.py"] + argv),
+            patch.object(login, "sync_playwright") as pw,
+        ):
+            try:
+                login.main()
+            except SystemExit as exc:
+                return exc.code, buf.getvalue(), pw
+        return None, buf.getvalue(), pw
+
+    def test_bad_display_exits_before_browser(self):
+        code, out, pw = self._main(["--manual", "--display", ":abc"])
+        self.assertEqual(code, 2)
+        self.assertIn("显示号", out)
+        pw.assert_not_called()
+
+    def test_missing_display_value_exits_before_browser(self):
+        code, out, pw = self._main(["--manual", "--display"])
+        self.assertEqual(code, 2)
+        self.assertIn("--display", out)
+        pw.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()

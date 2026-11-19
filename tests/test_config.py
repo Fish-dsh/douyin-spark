@@ -435,15 +435,59 @@ class TestPreflight(unittest.TestCase):
         这里只管**格式**: "是否存在那个显示" 是运行时的事(check_xvfb_display 查
         /tmp/.X11-unix 里的 socket), 配置层不该去猜机器上开了哪些显示号。
         """
-        # 注意 "  " 会先 strip 成空串再判, 而 ":99 " 是允许的(前后空白无意义),
-        # 所以这两个都不该出现在 bad 里 —— 前者是真错, 后者是真对。
-        for bad in (":abc", "99", "/tmp/.X11-unix/X99", "", "  "):
+        # 注意 ":99 " 是允许的(前后空白无意义)。
+        # 空串/None/空白串也不在 bad 里: 它们现在是「回落到当前 shell 的 DISPLAY」,
+        # 见下面 test_blank_display_* 两条。
+        for bad in (":abc", "99", "/tmp/.X11-unix/X99"):
             with self.subTest(display=bad):
                 with self.assertRaises(ConfigError) as cm:
                     preflight(
                         {"accounts": [{"name": "main"}], "headless": False, "display": bad}
                     )
                 self.assertIn("display", str(cm.exception))
+
+    def test_blank_display_without_env_raises(self):
+        """display 留空且环境无 DISPLAY = 真的没有显示可用, 必须拒。
+
+        空 display 以前一律判错, 于是 config.dev.json 的 "display": null
+        连自己项目的门禁都过不去; 一律放行又会让板上丢键时静默跑成
+        一个连不上的显示。现在的语义是「回落到当前 shell 的 DISPLAY」。
+        """
+        for blank in (None, "", "   "):
+            with (
+                self.subTest(display=blank),
+                patch.dict("os.environ", {"DISPLAY": ""}),
+                self.assertRaises(ConfigError) as cm,
+            ):
+                preflight(
+                    {
+                        "accounts": [{"name": "main"}],
+                        "headless": False,
+                        "display": blank,
+                    }
+                )
+            self.assertIn("DISPLAY", str(cm.exception))
+
+    def test_blank_display_falls_back_to_env(self):
+        """display 留空但当前 shell 有 DISPLAY = 合法的桌面调试配置。"""
+        with patch.dict("os.environ", {"DISPLAY": ":0"}):
+            preflight({"accounts": [{"name": "main"}], "headless": False, "display": None})
+
+    def test_dev_config_passes_on_a_desktop(self):
+        """config.dev.json 的 "display": null 必须能在桌面上启动。
+
+        这条钉住 run_dev.sh 的可运行性: dev 配置刻意不写死 :99,
+        而是让浏览器用当前会话的 DISPLAY。
+        """
+        with patch.dict("os.environ", {"DISPLAY": ":0"}):
+            preflight(
+                {
+                    "accounts": [{"name": "main"}],
+                    "headless": False,
+                    "display": None,
+                    "browser_reuse": True,
+                }
+            )
 
     def test_display_with_screen_suffix_passes(self):
         preflight(
@@ -452,12 +496,27 @@ class TestPreflight(unittest.TestCase):
 
     def test_headless_allowed_by_env_escape_hatch(self):
         """桌面档调试的唯一出口: SPARK_ALLOW_HEADLESS=1 时放行 headless。"""
-        from unittest.mock import patch
-
         from src import config
 
         with patch.dict("os.environ", {config.ALLOW_HEADLESS_ENV: "1"}):
-            preflight({"accounts": [{"name": "main"}], "headless": True})
+            preflight(
+                {"accounts": [{"name": "main"}], "headless": True, "display": ":99"}
+            )
+
+    def test_env_escape_hatch_still_checks_display(self):
+        """逃生口只放行 headless 这一条, display 照查。
+
+        以前一开逃生口就整段 return, 连 display 都不看了 —— 只想关掉 headless
+        门禁的人, 顺手把「必须有显示」也一起关掉了。
+        """
+        from src import config
+
+        with (
+            patch.dict("os.environ", {config.ALLOW_HEADLESS_ENV: "1", "DISPLAY": ""}),
+            self.assertRaises(ConfigError) as cm,
+        ):
+            preflight({"accounts": [{"name": "main"}], "headless": True, "display": ":abc"})
+        self.assertIn("display", str(cm.exception))
 
     def test_env_escape_hatch_still_requires_accounts(self):
         """逃生口只放开有头门禁, accounts 为空仍然硬失败。"""

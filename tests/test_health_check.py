@@ -485,8 +485,15 @@ class TestHeadedConfigCheck(unittest.TestCase):
         self.root = Path(self.tmpdir.name)
         self.old_config = health_check.CONFIG_FILE
         health_check.CONFIG_FILE = self.root / "config.json"
+        self.addCleanup(self._restore_config)
+        # display 留空现在等价于「用当前环境的 DISPLAY」, 判据会去看 os.environ。
+        # 开发机上 DISPLAY 可能是 :0(WSLg/桌面), 那会让空 display 意外通过 ——
+        # 用例里必须把它按掉, 才能稳定验证「没有显示就失败」。
+        self._env = patch.dict(os.environ, {"DISPLAY": ""})
+        self._env.start()
+        self.addCleanup(self._env.stop)
 
-    def tearDown(self):
+    def _restore_config(self):
         health_check.CONFIG_FILE = self.old_config
         self.tmpdir.cleanup()
 
@@ -542,11 +549,49 @@ class TestHeadedConfigCheck(unittest.TestCase):
         """
         # 只判格式: ":88" 是合法格式, 它在板上不存在这件事由 check_xvfb_display
         # 查 /tmp/.X11-unix 里的 socket 兜住, 不该在这里判。
-        for bad in (":abc", "99", "/tmp/.X11-unix/X99", ""):
+        # 空串/null 也不在 bad 里: 它们的含义是「用当前 shell 的 DISPLAY」,
+        # 见下面两条专门用例。
+        for bad in (":abc", "99", "/tmp/.X11-unix/X99"):
             with self.subTest(display=bad):
                 ok, msg = self._cfg({"headless": False, "display": bad})
                 self.assertFalse(ok)
                 self.assertIn("display", msg)
+
+    def test_blank_display_without_env_fails(self):
+        """display 留空 + 环境里也没有 DISPLAY = 没有可用显示, 必须失败。
+
+        以前的判据把空 display 一律判错, 于是 config.dev.json 的
+        "display": null 连自己项目的门禁都过不去; 一律放行又会让板上
+        丢键时静默跑成一个连不上的显示。正确的读法是「回落到当前 shell」。
+        """
+        for blank in (None, "", "   "):
+            with self.subTest(display=blank):
+                ok, msg = self._cfg({"headless": False, "display": blank})
+                self.assertFalse(ok)
+                self.assertIn("DISPLAY", msg)
+
+    def test_blank_display_falls_back_to_env(self):
+        """display 留空 + 当前 shell 有 DISPLAY = 合法的桌面调试配置。"""
+        with patch.dict(os.environ, {"DISPLAY": ":0"}):
+            ok, msg = self._cfg({"headless": False, "display": None})
+        self.assertTrue(ok)
+        self.assertIn(":0", msg)
+
+    def test_env_escape_hatch_still_checks_display(self):
+        """SPARK_ALLOW_HEADLESS 只放行 headless, display 照查。
+
+        以前逃生口一开就整段 return, 连 display 都不看了 —— 一个只想关掉
+        headless 门禁的人, 顺手把「必须有显示」也关掉了。
+        """
+        with patch.dict(os.environ, {health_check._ALLOW_HEADLESS_ENV: "1"}):
+            ok, msg = self._cfg({"headless": True, "display": ":abc"})
+        self.assertFalse(ok)
+        self.assertIn("display", msg)
+
+    def test_env_escape_hatch_allows_headless_true(self):
+        with patch.dict(os.environ, {health_check._ALLOW_HEADLESS_ENV: "1"}):
+            ok, _ = self._cfg({"headless": True, "display": ":99"})
+        self.assertTrue(ok)
 
     def test_display_with_screen_suffix_ok(self):
         ok, _ = self._cfg({"headless": False, "display": ":99.0"})
@@ -597,43 +642,73 @@ class TestXvfbCheck(unittest.TestCase):
             return health_check.check_xvfb_display()
 
     def test_skips_without_systemctl(self):
+        """无 systemctl 且无 socket = 查不了, 返回 skip 而不是 ok。
+
+        以前这里 return True 配一句「跳过」, 调用方拿到和真通过一样的布尔值,
+        于是「无从核验的环境」被记成了健康。
+        """
         with patch("src.health_check.shutil.which", return_value=None):
-            ok, msg = health_check.check_xvfb_display()
-        self.assertTrue(ok)
-        self.assertIn("跳过", msg)
+            state, msg = health_check.check_xvfb_display()
+        self.assertEqual(state, "skip")
+        self.assertIn("未核验", msg)
+
+    def test_no_systemctl_but_socket_present_is_ok(self):
+        """没有 systemd, 但 X socket 真在 —— 有「显示可用」的直接证据, 算通过。"""
+        (self.sockets / "X99").write_text("", encoding="utf-8")
+        with patch("src.health_check.shutil.which", return_value=None):
+            state, msg = health_check.check_xvfb_display()
+        self.assertEqual(state, "ok")
+        self.assertIn("X99", msg)
+
+    def test_missing_config_skips(self):
+        """没有 config.json 时无从知道该查哪个显示号, 只能 skip。"""
+        health_check.CONFIG_FILE.unlink()
+        state, msg = health_check.check_xvfb_display()
+        self.assertEqual(state, "skip")
+        self.assertIn("config.json", msg)
 
     def test_active_with_socket_ok(self):
         (self.sockets / "X99").write_text("", encoding="utf-8")
-        ok, msg = self._run()
-        self.assertTrue(ok)
+        state, msg = self._run()
+        self.assertEqual(state, "ok")
         self.assertIn("socket", msg)
 
     def test_active_without_socket_fails(self):
         """unit 说 active 但显示号没有 socket —— 那是崩溃重启中的 Xvfb, 不是能用的显示。"""
-        ok, msg = self._run()
-        self.assertFalse(ok)
+        state, msg = self._run()
+        self.assertEqual(state, "fail")
         self.assertIn("socket", msg)
         self.assertIn(":99", msg)
+
+    def test_systemctl_error_skips(self):
+        """systemctl 调用炸了 = 查不了, 不能算通过也不能算失败。"""
+        with (
+            patch("src.health_check.shutil.which", return_value="/usr/bin/systemctl"),
+            patch("src.health_check.subprocess.run", side_effect=OSError("boom")),
+        ):
+            state, msg = health_check.check_xvfb_display()
+        self.assertEqual(state, "skip")
+        self.assertIn("未核验", msg)
 
     def test_wrong_display_number_fails(self):
         """config 里写 :88, 而机器上只有 X99 —— 配置写错必须被抓住。"""
         self._write_config(":88")
         (self.sockets / "X99").write_text("", encoding="utf-8")
-        ok, msg = self._run()
-        self.assertFalse(ok)
+        state, msg = self._run()
+        self.assertEqual(state, "fail")
         self.assertIn(":88", msg)
 
     def test_display_with_screen_suffix_uses_x11_socket(self):
         """:99.0 是合法的 X 显示写法, socket 名仍是 X99。"""
         self._write_config(":99.0")
         (self.sockets / "X99").write_text("", encoding="utf-8")
-        ok, _ = self._run()
-        self.assertTrue(ok)
+        state, _ = self._run()
+        self.assertEqual(state, "ok")
 
     def test_inactive_fails(self):
         (self.sockets / "X99").write_text("", encoding="utf-8")
-        ok, msg = self._run(active=False)
-        self.assertFalse(ok)
+        state, msg = self._run(active=False)
+        self.assertEqual(state, "fail")
         self.assertIn("xvfb", msg)
 
 

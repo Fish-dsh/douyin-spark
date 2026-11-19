@@ -63,8 +63,16 @@ assert_clean() {
     local bad
     # .env.example / .env.sample / .env.template 是给人看模板, 必须上传;
     # 除此之外的 .env 与 .env.* 都可能带着真口令。
-    bad="$(tar -tzf "$1" \
-        | grep -Ei '(^|/)(\.env|storage\.json|state\.json|auth\.json|id_rsa)$|\.env\.[a-z]+$' \
+    #
+    # 正则要点:
+    #   .env 后面用 (\.[^/]*)? 而不是 \.[a-z]+ —— 多段名字(.env.production.local)
+    #   是真实存在的写法, 老写法只匹配一段, 漏过去就是口令上网。
+    #   凭据文件名也不止 .env/storage.json: Playwright 的 cookies.json、GCP 的
+    #   credentials.json、各种 id_* 私钥都是同一个后果。
+    local pat
+    pat='(^|/)(\.env(\.[^/]*)?|storage\.json|state\.json|auth\.json'
+    pat="$pat"'|credentials\.json|cookies?\.json|id_rsa|id_dsa|id_ecdsa|id_ed25519)$'
+    bad="$(tar -tzf "$1" | grep -Ei "$pat" \
         | grep -Eiv '\.env\.(example|sample|template)$' || true)"
     if [ -n "$bad" ]; then
         echo "[deploy][ERROR] 压缩包里混进了不该上传的文件, 已中止:" >&2
@@ -131,8 +139,11 @@ ssh "$HOST" "REMOTE_DIR='$REMOTE_DIR' REMOTE_USER='$REMOTE_USER' \
     NEW_TGZ='$NEW_TGZ' NEW_LIST='$NEW_LIST' bash -s" <<'SH' || rollback
 set -euo pipefail
 cd "$REMOTE_DIR"
-tar -xzf "$NEW_TGZ"
+# 先出清单, 后解包 —— 顺序反了的话, 解包中途失败(磁盘满/中途断连)时
+# $NEW_LIST 还不存在, rollback 里那段 comm 会被整段跳过, 于是"旧代码 +
+# 残留新文件"的混合工作区被留在板上, 而回滚还报成功。
 tar -tzf "$NEW_TGZ" | sort >"$NEW_LIST"
+tar -xzf "$NEW_TGZ"
 find . -path ./.venv -prune -o -name '*.py' -exec chmod a-x {} +
 for f in run_cron.sh run_dev.sh; do
     [ -f "$f" ] && chmod +x "$f"

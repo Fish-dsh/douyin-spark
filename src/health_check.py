@@ -406,6 +406,39 @@ def notify(fail_summary: str) -> bool:
     return True
 
 
+_DISPLAY_RE = re.compile(r"^:\d+(\.\d+)?$")
+# 与 src/config.py 的 ALLOW_HEADLESS_ENV 同名同义: 桌面调试的逃生口。
+# 这里也认它, 否则「preflight 放行的配置, 巡检判失败」——同一条硬门禁两套口径,
+# 人只会学会无视巡检。
+_ALLOW_HEADLESS_ENV = "SPARK_ALLOW_HEADLESS"
+
+
+def _headless_problem(cfg: dict) -> str:
+    """有头模式硬门禁的判定正文; 通过返回空串。判据与 src/config.py 一致。"""
+    headless = cfg.get("headless")
+    if headless is not False:
+        if os.environ.get(_ALLOW_HEADLESS_ENV) == "1":
+            # 逃生口只放行 headless 这一条, display 照查(见下)。
+            pass
+        else:
+            return (
+                f"headless={headless!r}; 应为 false"
+                "(headless 会被抖音拦截并渲染挂死)"
+            )
+    display = cfg.get("display")
+    if display is None or (isinstance(display, str) and not display.strip()):
+        env_display = (os.environ.get("DISPLAY") or "").strip()
+        if _DISPLAY_RE.match(env_display):
+            return ""
+        return (
+            "display 未配置, 当前环境也没有可用的 DISPLAY; "
+            '应为 display=":99", 或在有桌面的会话里再跑'
+        )
+    if not isinstance(display, str) or not _DISPLAY_RE.match(display.strip()):
+        return f"display={display!r}; 应为 :N 形式(如 \":99\")"
+    return ""
+
+
 def check_headed_config() -> tuple[bool, str]:
     """有头模式配置断言(2026-09-30 事故根因: 板子 config.json 丢 headless/display
     两键 → 实际跑 headless → 渲染挂死 → 全 skip 漏发 10 人)。"""
@@ -424,23 +457,15 @@ def check_headed_config() -> tuple[bool, str]:
         return False, f"config.json 解析失败, 无法确认有头模式配置: {exc}"
     if not isinstance(cfg, dict):
         return False, f"config.json 顶层不是对象({type(cfg).__name__}), 无法确认有头模式配置"
-    headless = cfg.get("headless")
+    problem = _headless_problem(cfg)
+    if problem:
+        return False, f"config.json 有头模式配置缺失/错误: {problem}"
     display = cfg.get("display")
-    # display 必须真的是一个显示号。以前这里只判「是否为真值」, 于是 ":88"
-    # 这种板上根本不存在的显示号也能通过 —— 配置写错和跑起来之间又缺了一道闸。
-    if (
-        headless is False
-        and isinstance(display, str)
-        and re.match(r"^:\d+(\.\d+)?$", display.strip())
-    ):
-        return True, f"有头模式配置正常 (display={display})"
-    return (
-        False,
-        (
-            f"config.json 有头模式配置缺失/错误: headless={headless!r}, display={display!r}; "
-            '应为 headless=false 且 display=":99" '
-            "(headless 会被抖音拦截并渲染挂死; display 必须是 :N 形式)"
-        ),
+    if isinstance(display, str) and display.strip():
+        return True, f"有头模式配置正常 (display={display.strip()})"
+    return True, (
+        f"有头模式配置正常 (display 用当前环境 DISPLAY="
+        f"{(os.environ.get('DISPLAY') or '').strip()})"
     )
 
 
@@ -456,8 +481,8 @@ def _configured_display() -> str:
     return display.strip() if isinstance(display, str) else ""
 
 
-def check_xvfb_display() -> tuple[bool, str]:
-    """Xvfb 常驻服务检查。
+def check_xvfb_display() -> tuple[str, str]:
+    """Xvfb 常驻服务检查。返回 (状态, 说明), 状态取 "ok" / "fail" / "skip"。
 
     判据分两层, 都要过:
       1. systemd 说 xvfb.service 是 active —— 这是服务管理面的证据;
@@ -468,11 +493,13 @@ def check_xvfb_display() -> tuple[bool, str]:
     报 active, 而浏览器连上去就是一个连不上的显示。反过来, 板上把 display 配成
     ":88" 也照样能过旧检查 —— 那台机器上根本没有 :88。
 
-    无 systemctl 的环境(开发机/CI)按老规矩跳过服务层, 但仍会核 socket 是否
-    存在: 有就说明显示真的在, 没有则这一项无从确认, 仍报跳过。
+    「查不了」不再当成「没问题」。以前无 systemctl 且无 socket 时直接 return
+    True「跳过」, 调用方看到的是和真通过一样的布尔值 —— 一个无从核验的环境
+    就被记成了健康。这里把三态分开: 有证据通过才 ok, 有证据不对才 fail,
+    其余一律 skip, 由调用方显式打印「未核验」而不是混进「正常」。
     """
     if not CONFIG_FILE.is_file():
-        return True, "config.json 不存在, 跳过 Xvfb 检查"
+        return "skip", "config.json 不存在, 未核验 Xvfb(先 cp config.example.json config.json)"
     display = _configured_display()
     socket_ok = False
     socket_name = ""
@@ -481,8 +508,11 @@ def check_xvfb_display() -> tuple[bool, str]:
         socket_ok = (_X11_SOCKET_DIR / socket_name).exists()
     if shutil.which("systemctl") is None:
         if socket_ok:
-            return True, f"无 systemctl, 但 {_X11_SOCKET_DIR}/{socket_name} 存在"
-        return True, "无 systemctl, 跳过 Xvfb 检查"
+            return "ok", f"无 systemctl, 但 {_X11_SOCKET_DIR}/{socket_name} 存在"
+        return "skip", (
+            "无 systemctl 且没有 X socket, 未核验 Xvfb"
+            "(开发机正常现象; 部署机上这项必须能核验)"
+        )
     try:
         proc = subprocess.run(
             ["systemctl", "is-active", "xvfb"],
@@ -492,11 +522,11 @@ def check_xvfb_display() -> tuple[bool, str]:
             check=False,
         )
     except Exception as exc:
-        return True, f"systemctl 检查失败({exc}), 跳过 Xvfb 检查"
+        return "skip", f"systemctl 调用失败({exc}), 未核验 Xvfb"
     state = (proc.stdout or proc.stderr or "").strip()
     if proc.returncode != 0 or state != "active":
         return (
-            False,
+            "fail",
             (
                 f"xvfb.service 状态={state or 'unknown'}, 有头模式将无虚拟显示可用 "
                 "(启动: systemctl start xvfb)"
@@ -504,14 +534,17 @@ def check_xvfb_display() -> tuple[bool, str]:
         )
     if display and not socket_ok:
         return (
-            False,
+            "fail",
             (
                 f"xvfb.service 报 active, 但配置的 display={display} 没有对应 socket "
                 f"({_X11_SOCKET_DIR}/{socket_name} 不存在); "
                 "多半是 unit 在崩溃重启, 或者 display 配错了显示号"
             ),
         )
-    return True, f"xvfb.service active (display={display or '未配置'}, socket={'有' if socket_ok else '未核验'})"
+    return "ok", (
+        f"xvfb.service active (display={display or '未配置'}, "
+        f"socket={'有' if socket_ok else '未核验'})"
+    )
 
 
 # 注: 早期还有一个「记档对账」检查项, 依赖维护者的私有工作日志工具, 与本项目运行无关,
@@ -563,19 +596,30 @@ def main() -> int:
         )
 
     failures = []
-    for fn in (
-        check_state_date,
-        check_log_has_today,
-        check_headed_config,
-        check_xvfb_display,
-    ):
+    skipped = []
+    for fn in (check_state_date, check_log_has_today, check_headed_config):
         ok, msg = fn()
         if not ok:
             failures.append(msg)
+    # Xvfb 这一项是三态的: ok / fail / skip。「查不了」不能混进「正常」——
+    # 以前它和无 systemctl 的「跳过」共用同一个 True, 结果是无从核验的环境
+    # 与真通过输出完全一样。skip 时明确打印「未核验」, 但不算失败(开发机没有
+    # systemd 是常态, 判失败会让本机天天红)。
+    xvfb_state, xvfb_msg = check_xvfb_display()
+    if xvfb_state == "fail":
+        failures.append(xvfb_msg)
+    elif xvfb_state == "skip":
+        skipped.append(xvfb_msg)
 
     if not failures:
         if not args.quiet:
-            print("[health] OK: 今日续火花运行正常")
+            if skipped:
+                print(
+                    "[health] OK: 今日续火花运行正常"
+                    f"（但有未核验项: {'; '.join(skipped)}）"
+                )
+            else:
+                print("[health] OK: 今日续火花运行正常")
         if FAIL_MARKER.is_file():
             try:
                 FAIL_MARKER.unlink()

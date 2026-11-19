@@ -15,6 +15,8 @@
 
 ## 方式 A：本地登录一次 → 只把登录态传过去
 
+> **先分清你在做哪件事**：下面的第 2 步是**更新已有部署**（部署机上已经有 `/opt/douyin-spark` 这个 git 仓库）。**首次部署**没有那个仓库，`git -C /opt/douyin-spark fetch` 会直接报 `not a git repository` —— 首次部署请走[手动部署步骤](#手动部署步骤)，或先用 `rsync` 把代码放上去，之后再回来用下面的更新流程。
+
 1. **本机**（有屏幕的那台）把账号密码填入 `.env`（`cp .env.example .env && chmod 600 .env`，格式见文件内注释），跑 `python login.py --password`（有头会话）生成 `runtime/storage.json`。这里的「有头」用的是**当前 shell 的 `DISPLAY`**，不是 `config.json` 里的 `display`：桌面机器上它通常是 `:0`，别按配置抄 `:99`；也不要用 `sudo` 跑（sudo 会丢掉 `DISPLAY`）。
 2. **代码**同步到部署机（`REMOTE` 换成你自己的 `user@host`）：
    ```bash
@@ -71,7 +73,10 @@ SPARK_HOST=USER@HOST ./tools/deploy.sh
    ```
    这里用 `requirements-vision.txt`（= `requirements.txt` + opencv）是因为板子要跑视觉兜底的 CV 粗定位层。内存/磁盘更紧的机器可以只装 `requirements.txt`：没装 opencv 时 `src/vision_cv.py` 里 `cv2` 为 `None`，该层自动放弃，主链路不受影响。三份依赖的区别见 [development.md](development.md)。
    `install --with-deps chromium` 一步也能装完，但它会把「下载浏览器」也塞进 root 的 `~/.cache/ms-playwright`，之后普通用户跑 cron 反而找不到浏览器；上面两步分开就没有这个坑。
-2. 准备 `config.json`（自动发现、`send_window` 对齐 cron）。**`headless` 必须 `false`、`display` 必须写 `:99`**：这两个不再只是"警告一下"，`preflight()` 会把它们当启动硬门禁——缺 `headless` 键、写 `true`、或者 `display` 写成 `:abc`/裸数字/路径，都会抛 `ConfigError` 并以**退出码 5** 拒绝运行。桌面临时调试要跑 headless，唯一出口是 `SPARK_ALLOW_HEADLESS=1`（cron 环境里没有这个变量）。`engine` 字段已废弃，代码不读，别写。
+2. 准备 `config.json`（自动发现、`send_window` 对齐 cron）。**`headless` 必须 `false`、`display` 建议明写 `:99`**：
+   - `headless` 写成 `true` → `preflight()` 抛 `ConfigError`，**退出码 5**。缺这个键时不拒跑，`load_config()` 会补成 `false` 并打一条警告（2026-09-30 事故就是缺键静默跑成了无头）。桌面临时调试要跑 headless，唯一出口是 `SPARK_ALLOW_HEADLESS=1`（cron 环境里没有这个变量，且它**只**放行 headless 这一条，`display` 照查）。
+   - `display` 写成 `:abc`/裸数字/路径 → 抛 `ConfigError`（退出码 5）。留空或缺键时回落到**当前进程的 `DISPLAY`**：`run_cron.sh` 已经 `export DISPLAY=:99`，所以板上实际仍跑在 `:99`；只有在既没配 display、环境里也没有合法 DISPLAY 时才拒跑。
+   - `engine` 字段已废弃，代码不读，别写。
 3. **git 兜底**：项目已是 git 仓库。scp 整目录会带上 `.git`；若只传代码文件，部署机上执行 `git init && git add -A && git commit -m "chore: import"`。
 4. 部署机上配 cron：`crontab -e` 写入 `0 0 * * * /opt/douyin-spark/run_cron.sh`，并确保脚本可执行：`chmod +x /opt/douyin-spark/run_cron.sh && chown -R USER:GROUP /opt/douyin-spark`（**scp/覆盖更新脚本会丢 x 位，cron 调用将 Permission denied 且无日志，务必校验**）。
 5. **健康检查 cron**（堵静默失败，**晚于主任务最晚可能的收尾时刻**）：`45 1 * * * /opt/douyin-spark/.venv/bin/python /opt/douyin-spark/src/health_check.py --quiet --notify-only-on-change`（如需告警，先在 `config.json` 配 `notify_cmd`，见 `docs/operations.md`）。原为 `15 1`，2026-10-04 随 `timeout 45m → 90m` 推迟到 **01:45**。**"最晚 01:30 收尾"这个前提现在由 `run_cron.sh` 的硬截止 `_HARD_STOP_MIN=95`（01:35）保证**：距 01:35 不足 20 分钟不再起新一轮，每轮 timeout 也按剩余时间收窄（00:00 起的第一轮仍是完整 90m）。否则 rc=3 的重跑能跑到 01:53，而 health_check 见"主任务还在跑"会**不判定地退 0**——那一晚等于没人检查过。

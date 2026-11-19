@@ -15,6 +15,7 @@ from __future__ import annotations
 import glob
 import json
 import os
+import re
 import sys
 import time
 from pathlib import Path
@@ -699,8 +700,18 @@ def manual_login(
     return False
 
 
+# X 显示号必须是 :N 或 :N.M。与 src/config.py::_DISPLAY_RE 同一条判据 ——
+# 配置层查的是 spark.py 那份 display, 这里查的是人工登录这次进程的 DISPLAY,
+# 两份输入不同, 规则必须一样。
+_DISPLAY_RE = re.compile(r"^:\d+(\.\d+)?$")
+
+
 def _prepare_display(explicit: str | None, needs_display: bool) -> bool:
-    """确认真的有 X 显示可用; 返回 False 表示这次登录必须中止。
+    """判断这次登录有没有一个可用的 DISPLAY **设置**; False 表示必须中止。
+
+    查的是「有没有一个格式正确的 DISPLAY」, 不是「那个 X server 是否真在跑」——
+    后者要连 X, 而连 X 正是浏览器要做的事; 在这里另起一条探测路径, 出错方式
+    只会比浏览器自己的报错更难懂。名字用 prepare 而不是 verify, 就是这层意思。
 
     为什么要在启动浏览器之前单独查一次 —— 这句检查是给第一次装的人看的:
       - config.json 里的 display 只服务 spark.py(src/session.py 会把它注入
@@ -708,25 +719,42 @@ def _prepare_display(explicit: str | None, needs_display: bool) -> bool:
         照着 config.example.json 抄了 ":99" 却没装 Xvfb 的人, 直接跑 --manual
         只会拿到 Playwright 的 "Missing X server or $DISPLAY" 栈, 看不出要做什么。
       - 用 sudo 跑会丢掉 DISPLAY, 表现和"没装 X"一模一样, 所以要一起提。
+      - 格式也要查: DISPLAY=99 或 DISPLAY=/tmp/.X11-unix/X99 都是常见手误,
+        它们会被原样带进浏览器底层, 然后在更深的地方炸。
     """
     if not needs_display:
         _log("[cli] 无头登录, 不需要 X 显示")
         return True
     if explicit:
+        if not _DISPLAY_RE.match(explicit):
+            _log(
+                f"[cli] --display 的值 {explicit!r} 不是合法的显示号,"
+                " 应形如 :99 或 :99.0"
+            )
+            return False
         os.environ["DISPLAY"] = explicit
         _log(f"[cli] 按命令行参数使用 DISPLAY={explicit}")
         return True
     current = (os.environ.get("DISPLAY") or "").strip()
     if current:
+        if not _DISPLAY_RE.match(current):
+            _log(
+                f"[cli] 当前环境 DISPLAY={current!r} 不是合法的显示号,"
+                " 应形如 :0 或 :99。若是手误, 用 --display :N 显式指定。"
+            )
+            return False
         _log(f"[cli] 使用当前环境 DISPLAY={current}")
         return True
     _log(
         "[cli] 当前环境没有 DISPLAY, 有头浏览器打不开。两条路, 按机器情况选:\n"
-        "  1) 这台机器有桌面: 在桌面会话里直接跑(不要加 sudo, sudo 会丢掉 DISPLAY),"
-        " 或者 DISPLAY=:0 .venv/bin/python login.py --manual\n"
-        "  2) 这台机器没有桌面(服务器/VPS/板子): 先起一个虚拟显示再指定它 ——\n"
-        "     sudo apt install -y xvfb && Xvfb :99 -screen 0 800x600x24 &\n"
+        "  1) 机器有桌面: 在桌面会话里直接跑(不要加 sudo, sudo 会丢掉 DISPLAY),\n"
+        "     或者 DISPLAY=:0 .venv/bin/python login.py --manual\n"
+        "  2) 机器没有桌面(服务器/VPS/板子): 先起一个虚拟显示再指定它, 两条命令分开敲.\n"
+        "     sudo apt install -y xvfb\n"
+        "     Xvfb :99 -screen 0 800x600x24 &\n"
         "     .venv/bin/python login.py --manual --display :99\n"
+        "     写成 `apt install ... && Xvfb ... &` 会把整条 && 链一起丢到后台,\n"
+        "     装包失败也看不出来。\n"
         "  注意 config.json 里的 display 只管 spark.py, 人工登录不读它。"
     )
     return False
@@ -751,12 +779,16 @@ def main() -> None:
     display = None
     if "--display" in args:
         idx = args.index("--display")
-        if idx + 1 < len(args):
-            display = args[idx + 1]
-            args = [a for i, a in enumerate(args) if i not in (idx, idx + 1)]
-        else:
+        if idx + 1 >= len(args):
             _log("[cli] --display 后面要跟显示号, 例如 --display :99")
             sys.exit(2)
+        display = args[idx + 1]
+        # 值不合法就在这里退出: 让它一路走到浏览器启动, 报出来的会是底层
+        # 连接错误, 与「参数写错」隔了好几层。
+        if not _DISPLAY_RE.match(display):
+            _log(f"[cli] --display 的值 {display!r} 不是合法的显示号, 应形如 :99 或 :99.0")
+            sys.exit(2)
+        args = [a for i, a in enumerate(args) if i not in (idx, idx + 1)]
 
     headless = "--headless" in args
     # --manual 的浏览器恒定有头(src 里写死 headless=False), 所以 --headless 对它无效。

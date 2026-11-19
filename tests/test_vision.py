@@ -30,22 +30,30 @@ _ROWS = [
 
 
 class FakePage:
-    """最小页面替身: evaluate 分「脱敏(单参)」与「取证(带参)」两种返回。"""
+    """最小页面替身: evaluate 分「脱敏(单参)」与「取证(带参)」两种返回。
 
-    def __init__(self, rows=None, screenshot_ok=True):
+    脱敏分支现在回报结构化对象(masked/textNodes/uncovered/keptFlame), 不再是
+    一个裸计数 —— 覆盖自检需要「遮了几处」与「还有几处没被盖住」两个数。
+    """
+
+    def __init__(self, rows=None, screenshot_ok=True, redact=None):
         self.rows = rows if rows is not None else []
         self.screenshot_ok = screenshot_ok
+        self.redact = redact if redact is not None else {
+            "masked": 3,
+            "textNodes": 3,
+            "uncovered": 0,
+            "keptFlame": 1,
+        }
 
     def evaluate(self, js, arg=None):
         if arg is None:
-            return 3  # 脱敏遮罩数量
+            return self.redact
         return self.rows
 
     def screenshot(self, path=None, **_kw):
         if self.screenshot_ok and path:
             Path(path).write_bytes(b"\x89PNG fake")
-
-
 class TestParsePoints(unittest.TestCase):
     def test_plain(self):
         self.assertEqual(_parse_points('[{"x":1,"y":2}]'), [{"x": 1, "y": 2}])
@@ -110,12 +118,65 @@ class TestRedactionScript(unittest.TestCase):
         self.assertIn("backgroundImage", _JS_REDACT)
 
     def test_keeps_flame_icon(self):
-        """火花图标必须留着: 行定位与「有没有火花」的判定都靠它。"""
+        """火花图标必须留着: 行定位与「有没有火花」的判定都靠它。
+
+        但放行条件必须收紧 —— 旧版只看「URL 里含 flame|fire|streak|spark」, 普通
+        头像或贴纸的 URL 只要撞上关键词就整块放行, 那等于没打码。现在要求三条同时
+        成立(命中关键词 + 图标尺寸 + 不在用户主页链接内), 缺一条一律盖住。
+        """
         from src.vision import _JS_REDACT
 
         self.assertIn("flame", _JS_REDACT)
-        self.assertIn("if (flame.test(s)) continue;", _JS_REDACT)
+        self.assertIn("keepFlame", _JS_REDACT)
+        self.assertIn("iconSized", _JS_REDACT)
+        self.assertIn("inUserLink", _JS_REDACT)
+        # 失败的默认方向必须是「盖住」, 所以放行只能出现在 continue 之前那一个分支
+        self.assertNotIn("if (flame.test(s)) continue;", _JS_REDACT)
 
+    def test_scans_shadow_roots_for_every_kind(self):
+        """shadow root 的遍历必须覆盖**所有**扫描, 不只是文本。
+
+        旧版只有文本遍历走 roots, img / 表单与媒体元素 / CSS 背景三条仍是
+        document.querySelectorAll —— shadow root 里的头像、canvas、背景图一个都
+        没盖, 而计数照样漂亮。
+        """
+        from src.vision import _JS_REDACT
+
+        qs = [l for l in _JS_REDACT.split("\n") if "querySelectorAll(" in l]
+        for line in qs:
+            self.assertNotIn(
+                "document.querySelectorAll(",
+                line,
+                f"这条扫描没走 roots, shadow DOM 里的会漏: {line.strip()}",
+            )
+
+    def test_covers_svg_images(self):
+        """SVG 的 <image>/<use> 一样能加载位图, 只扫 img 会整块漏掉。"""
+        from src.vision import _JS_REDACT
+
+        self.assertIn("svg image", _JS_REDACT)
+        self.assertIn("svg use", _JS_REDACT)
+        self.assertIn("xlink:href", _JS_REDACT)
+
+    def test_covers_other_css_image_channels(self):
+        """mask-image / border-image 同样是位图通道, 以前只扫 background-image。"""
+        from src.vision import _JS_REDACT
+
+        for prop in ("backgroundImage", "maskImage", "borderImageSource"):
+            self.assertIn(prop, _JS_REDACT, f"脱敏脚本漏了 {prop}")
+
+    def test_self_checks_coverage(self):
+        """脚本要自证「纸上加了遮罩」和「屏幕上真盖住」是同一件事。
+
+        position:fixed 的遮罩落在被 transform/filter 的祖先里时会相对那个祖先
+        定位 —— 数组是对的、屏幕上是错的。所以脚本必须拿渲染后的遮罩矩形回查文本
+        矩形, 并把 uncovered 报回来。
+        """
+        from src.vision import _JS_REDACT
+
+        self.assertIn("uncovered", _JS_REDACT)
+        self.assertIn("getBoundingClientRect()", _JS_REDACT)
+        self.assertIn("maskRects", _JS_REDACT)
     def test_walks_open_shadow_roots(self):
         """shadow DOM 里的文本 createTreeWalker(document.body) 走不进去。
 
@@ -141,12 +202,24 @@ class TestRedactionScript(unittest.TestCase):
 
 
 class TestRedactionGate(unittest.TestCase):
-    """覆盖率闸门: "脚本没抛异常" 不等于 "遮住了东西"。
+    """覆盖率闸门: "脚本没抛异常" 不等于 "遮住了东西", 更不等于 "盖全了"。
 
     这是脱敏链上最凶的一种失败 —— 页面还在骨架屏, 或者选择器改版后一个节点都
     没匹配上, 脚本老老实实返回 0, 旧代码照样 return True, 于是拍下一张完全没
     打码的整屏发给外部模型。没人会为此报错, 因为整条链看起来是成功的。
+
+    第二道是自检口径的变化: 以前只问「遮了几处 > 0 吗」, 现在还要问「有没有文本块
+    没被盖住」。一个文本节点就能满足前者, 满足不了后者。
     """
+
+    @staticmethod
+    def _ret(masked=3, text_nodes=3, uncovered=0, kept=1):
+        return {
+            "masked": masked,
+            "textNodes": text_nodes,
+            "uncovered": uncovered,
+            "keptFlame": kept,
+        }
 
     def _page(self, ret):
         page = MagicMock()
@@ -156,30 +229,48 @@ class TestRedactionGate(unittest.TestCase):
     def test_zero_hits_is_failure(self):
         from src import vision
 
-        page = self._page(0)
-        self.assertFalse(vision._inject_redaction(page))
+        self.assertFalse(vision._inject_redaction(self._page(self._ret(masked=0))))
 
     def test_negative_hits_is_failure(self):
         from src import vision
 
-        self.assertFalse(vision._inject_redaction(self._page(-1)))
+        self.assertFalse(vision._inject_redaction(self._page(self._ret(masked=-1))))
 
-    def test_non_numeric_result_is_failure(self):
+    def test_uncovered_text_is_failure(self):
+        """遮罩建了、但屏幕上没盖住某个文本块 —— 这就是外发明文, 必须放弃。"""
         from src import vision
 
-        self.assertFalse(vision._inject_redaction(self._page(None)))
-        self.assertFalse(vision._inject_redaction(self._page("很多")))
+        self.assertFalse(vision._inject_redaction(self._page(self._ret(uncovered=1))))
+
+    def test_non_structured_result_is_failure(self):
+        """老脚本返回裸数字; 新脚本返回对象。裸数字无法自证覆盖, 一律当失败。"""
+        from src import vision
+
+        for bad in (0, -1, 7, "12", None, "很多", [1, 2], True):
+            self.assertFalse(
+                vision._inject_redaction(self._page(bad)),
+                f"{bad!r} 不是结构化结果, 不该被当成脱敏成功",
+            )
 
     def test_positive_hits_pass(self):
         from src import vision
 
-        self.assertTrue(vision._inject_redaction(self._page(7)))
+        self.assertTrue(vision._inject_redaction(self._page(self._ret(masked=7))))
 
-    def test_numeric_string_passes(self):
+    def test_numeric_string_counts_pass(self):
         """JS 侧偶尔会把数字带成字符串回来, 这不是失败, 别误杀。"""
         from src import vision
 
-        self.assertTrue(vision._inject_redaction(self._page("12")))
+        ret = {"masked": "12", "textNodes": "12", "uncovered": "0", "keptFlame": "3"}
+        self.assertTrue(vision._inject_redaction(self._page(ret)))
+
+    def test_garbage_counts_are_failure(self):
+        """结构对、数字烂 —— 同样不能当成功。"""
+        from src import vision
+
+        self.assertFalse(
+            vision._inject_redaction(self._page({"masked": "很多", "uncovered": 0}))
+        )
 
     def test_evaluate_exception_is_failure(self):
         from src import vision
@@ -193,7 +284,7 @@ class TestRedactionGate(unittest.TestCase):
         from src import vision
 
         page = MagicMock()
-        page.evaluate.return_value = 0
+        page.evaluate.return_value = self._ret(masked=0)
         with (
             tempfile.TemporaryDirectory() as td,
             patch("src.vision._SHOT_DIR", Path(td)),
@@ -203,7 +294,20 @@ class TestRedactionGate(unittest.TestCase):
             self.assertEqual(list(Path(td).glob("*.png")), [])
         page.screenshot.assert_not_called()
 
+    def test_uncovered_aborts_screenshot(self):
+        """覆盖自检不过时同样不许落盘 —— 这一条守的是「看着加了其实没盖上」。"""
+        from src import vision
 
+        page = MagicMock()
+        page.evaluate.return_value = self._ret(uncovered=2)
+        with (
+            tempfile.TemporaryDirectory() as td,
+            patch("src.vision._SHOT_DIR", Path(td)),
+        ):
+            out = vision._redacted_screenshot(page)
+            self.assertEqual(out, "")
+            self.assertEqual(list(Path(td).glob("*.png")), [])
+        page.screenshot.assert_not_called()
 class TestLocateRows(unittest.TestCase):
     def test_happy_path(self):
         page = FakePage(rows=_ROWS)

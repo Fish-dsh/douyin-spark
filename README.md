@@ -6,7 +6,7 @@
 
 > **免责声明**：本项目为个人自动化实践，与抖音官方无关。自动化操作可能触发平台风控，请自行评估风险并遵守平台协议；由此产生的任何后果由使用者自负。
 
-`Python 3.9+` · `Playwright (Chromium)` · `MIT` · `591 单元测试`
+`Python 3.9+` · `Playwright (Chromium)` · `MIT` · `614 单元测试`
 
 ---
 
@@ -26,7 +26,9 @@ git clone https://github.com/Fish-dsh/douyin-spark.git
 cd douyin-spark
 
 python3 -m venv .venv
-.venv/bin/pip install -r requirements.txt      # 只跑主链路; 想要视觉兜底的 CV 层装 requirements-vision.txt
+.venv/bin/pip install -r requirements.txt      # 只跑主链路(够用)
+# 想连视觉兜底一起装(多一个 opencv; 1.5G 内存的机器装它有点重):
+#   .venv/bin/pip install -r requirements-vision.txt
 .venv/bin/playwright install chromium          # 首次需要下载浏览器
 # 若报缺系统库: sudo .venv/bin/playwright install-deps chromium
 
@@ -52,6 +54,9 @@ cp .env.example .env && chmod 600 .env         # 只有用密码登录才需要�
     ```bash
     sudo apt install -y xvfb
     Xvfb :99 -screen 0 800x600x24 &                # 部署机上它是 xvfb.service 常驻的
+    # 等 socket 真出现再登录: Xvfb 异步起, 命令返回不等于显示就绪
+    for i in $(seq 1 20); do [ -S /tmp/.X11-unix/X99 ] && break; sleep 0.5; done
+    ls /tmp/.X11-unix/                             # 应该看到 X99
     .venv/bin/python login.py --manual --display :99
     ```
     想在自己电脑上看这个窗口，再加 `ssh -X` 转发。
@@ -87,7 +92,14 @@ cp .env.example .env && chmod 600 .env         # 只有用密码登录才需要�
 ## 部署（Linux + cron）
 
 ```bash
-sudo rsync -a --exclude runtime --exclude .venv ./ /opt/douyin-spark/   # 1. 放代码（路径可在 run_cron.sh 改）
+# 1. 放代码（路径可在 run_cron.sh 改）
+#    rsync 不读 .gitignore, 排除项得自己写全 —— 少写一个就是把口令/登录态传上服务器
+sudo rsync -a --exclude runtime --exclude .venv --exclude .git \
+    --exclude config.json --exclude .env --exclude '.env.*' \
+    --exclude storage.json --exclude state.json --exclude '__pycache__' \
+    ./ /opt/douyin-spark/
+#    拷完把属主交回自己, 否则下一步建不了 .venv
+sudo chown -R "$USER:$USER" /opt/douyin-spark
 cd /opt/douyin-spark && python3 -m venv .venv && .venv/bin/pip install -r requirements-vision.txt
 sudo .venv/bin/playwright install-deps chromium                          # 2. 系统库（要 root）
 .venv/bin/playwright install chromium                                    #    浏览器本体（当前用户，别用 sudo）
