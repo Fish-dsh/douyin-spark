@@ -63,8 +63,15 @@ rollback() {
 
 echo "[deploy] 上传并解包到 $HOST:$REMOTE_DIR"
 scp -q "$NEW_TGZ" "$HOST:$NEW_TGZ"
-ssh "$HOST" "cd $REMOTE_DIR && tar -xzf $NEW_TGZ && chown -R $REMOTE_USER:$REMOTE_USER . \
-    && echo unpacked" || rollback
+# 解包后必须收拾权限: 从 Windows 挂载盘(WSL /mnt/c)或某些 tar 打包出来的成员带着
+# 0777, 于是 src/ tests/ 下每个 .py 都变成可执行 —— 板端 ruff 会刷出一整屏
+# EXE002 The file is executable but no shebang is present, 真正的 lint 错误被淹掉。
+# 这里统一: 所有 .py 去掉 x 位, 入口脚本与 tools/ 里的 shell/node 脚本保留 x 位。
+ssh "$HOST" "cd $REMOTE_DIR && tar -xzf $NEW_TGZ \
+    && find . -path ./.venv -prune -o -name '*.py' -exec chmod a-x {} + \
+    && chmod +x run_cron.sh run_dev.sh 2>/dev/null; \
+    chmod +x tools/*.sh tools/*.py 2>/dev/null; \
+    chown -R $REMOTE_USER:$REMOTE_USER . && echo unpacked" || rollback
 
 echo "[deploy] 校验配置与可导入性"
 ssh "$HOST" "cd $REMOTE_DIR && sudo -u $REMOTE_USER .venv/bin/python -" \
