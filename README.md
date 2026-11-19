@@ -31,6 +31,7 @@ python3 -m venv .venv
 # 若报缺系统库: sudo .venv/bin/playwright install-deps chromium
 
 cp config.example.json config.json             # 好友名单无需配置，扫描自动发现
+cp .env.example .env && chmod 600 .env         # 只有用密码登录才需要填；见下方说明
 
 # 生成登录态（二选一）
 .venv/bin/python login.py --manual             # 弹出浏览器，人工扫码/登录后保存
@@ -40,7 +41,12 @@ cp config.example.json config.json             # 好友名单无需配置，扫�
 .venv/bin/python spark.py                      # 真发（窗口内）
 ```
 
-浏览器必须是"有头"模式（`headless: false` + Xvfb `:99`），否则抖音会拦截——这条是硬约束，部署前先看 [部署文档](docs/deployment.md)。
+几句必须知道的话：
+
+- **浏览器必须是"有头"模式**（`headless: false` + Xvfb `:99`），否则抖音会拦、弱机还会渲染挂死。这条是硬约束，部署前先看 [部署文档](docs/deployment.md)。
+- **`.env` 不是必需的**：只有走 `login.py --password`（密码登录）才要往里填账号密码。用 `--manual` 扫码登录的话，`.env` 留空就行。**`.env` / `config.json` / `runtime/` 都不要提交**，已经在 `.gitignore` 里。
+- **登录态在 `runtime/storage.json`**。它单独传、别进仓库 —— 把它跟代码一起同步过去这件事做漏了，部署机会去扫码登录而无人值守下没人做，当晚就是静默零发送。细节见部署文档「三类东西分开走」。
+- **没有屏幕的 VPS 上 `--manual` 起不来**（没地方弹浏览器），要么本机登好再传 `storage.json`，要么临时装 Xvfb 用 `ssh -X` 转发窗口。
 
 ## 常用命令
 
@@ -73,17 +79,21 @@ cp config.example.json config.json             # 好友名单无需配置，扫�
 ```bash
 sudo rsync -a --exclude runtime --exclude .venv ./ /opt/douyin-spark/   # 1. 放代码（路径可在 run_cron.sh 改）
 cd /opt/douyin-spark && python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
-.venv/bin/playwright install --with-deps chromium                       # 2. 装依赖（--with-deps 需 sudo）
+sudo .venv/bin/playwright install-deps chromium                          # 2. 系统库（要 root）
+.venv/bin/playwright install chromium                                    #    浏览器本体（当前用户，别用 sudo）
 sudo apt install -y xvfb                                                 # 3. Xvfb 常驻 :99
 sudo cp deploy/xvfb.service /etc/systemd/system/
 sudo systemctl enable --now xvfb                                         #    开机自启并立刻拉起，systemctl status xvfb 应 active
-# 4. crontab（-e）：
+# 4. 登录态（runtime/storage.json）单独传，不要指望第 1 步带上它：
+#      scp runtime/storage.json REMOTE:/opt/douyin-spark/runtime/ && ssh REMOTE chmod 600 ...
+#    config.json 的账号密码在部署机上自己填，别把本机那份 scp 过去。
+# 5. crontab（-e）：
 #   0 0 * * *  /opt/douyin-spark/run_cron.sh
 #  45 1 * * *  /opt/douyin-spark/.venv/bin/python /opt/douyin-spark/src/health_check.py --quiet --notify-only-on-change
 # 注意：cron 不读 PATH，命令一律写绝对路径；run_cron.sh 必须 chmod +x。
 ```
 
-细节（同步方式、低配机内存优化、Python 版本对齐）见 [部署文档](docs/deployment.md)。
+细节（三类东西怎么分开同步、低配机内存优化、Python 版本对齐）见 [部署文档](docs/deployment.md)。
 
 ## 已知限制
 

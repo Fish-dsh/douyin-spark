@@ -409,12 +409,16 @@ def check_headed_config() -> tuple[bool, str]:
     # 没有配置文件就是没有可核验的有头配置, 必须报出来。
     if not CONFIG_FILE.is_file():
         return False, "config.json 不存在, 无法确认有头模式配置(先 cp config.example.json config.json)"
+    # 解析失败/非字典同样按**失败**处理。此前的写法是 return True「跳过检查」,
+    # 与上面「无 config.json 即失败」自相矛盾: 配置文件坏掉和配置文件没写,
+    # 对有头模式而言后果完全一样 —— 都无从确认, 而 spark.py 可能正以 headless
+    # 跑着。无法确认 ≠ 通过。
     try:
         cfg = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
-    except Exception:
-        return True, "config.json 解析失败, 跳过有头模式配置检查"
+    except Exception as exc:
+        return False, f"config.json 解析失败, 无法确认有头模式配置: {exc}"
     if not isinstance(cfg, dict):
-        return True, "config.json 非字典, 跳过有头模式配置检查"
+        return False, f"config.json 顶层不是对象({type(cfg).__name__}), 无法确认有头模式配置"
     headless = cfg.get("headless")
     display = cfg.get("display")
     if headless is False and display:

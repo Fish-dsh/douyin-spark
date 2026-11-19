@@ -14,9 +14,12 @@
 不会「点错好友发错人」——这在结构上杜绝了错发的可能。
 
 **脱敏**(用户要求「裁剪+打码后发」): 外发前用 DOM 注入黑色遮罩盖住**整个视口**的
-全部文本(昵称/消息预览/时间/右侧已打开的会话记录)与**头像 img**(人脸), 只保留
-火花图标(判定需要, 且按 src 关键词保留, 与类名无关)。最初只盖左栏 45%, 右侧会话
-记录会明文外发(2026-11-19 修正)。昵称不来自模型 —— 它由本地 DOM 回填, 故打码不影响功能。
+全部文本(昵称/消息预览/时间/右侧已打开的会话记录)、**头像 img**(人脸), 以及不进
+文本节点的四类像素: `input`/`textarea`/`select` 的值、`canvas`、`video`、带
+`background-image` 的元素。只保留火花图标与火花底图(判定需要, 按 src 关键词保留,
+与类名无关)。两处修正都在 2026-11-19: 最初只盖左栏 45%(右侧会话明文外发), 之后
+发现漏了输入框/canvas/video/背景图。昵称不来自模型 —— 它由本地 DOM 回填, 故打码
+不影响功能。以后新增任何可视元素, 都该按「会不会把用户内容画进截图」重新过一遍。
 
 **可用性**: 主用 AGNES(`agnes-2.5-flash`, 实测不限流、约 1.5s, 但坐标偏一行);
 备用 GLM(`glm-4.6v-flash`, 坐标准但免费档常限流)。都失败/未配置 → 返回空表,
@@ -101,7 +104,7 @@ _PROMPT = (
 _JS_REDACT = """
 () => {
   const vw = window.innerWidth, vh = window.innerHeight;
-  // 2026-11-19 修正: 原先只脱敏左侧 45%(limitX = vw * 0.45), 右侧已打开的会话
+  // 2026-11-19 修正: 原先只脱敏左侧 45%(limitX 取视口宽度的四成半), 右侧已打开的会话
   // 内容会明文外发 —— 点击好友前/定位失败时右侧往往正挂着上一个会话的记录。
   // 现在覆盖整个视口: 所有文本 + 所有非火花头像图片一律打码, 只保留火花图标
   // (行定位必需)。行定位只看左栏版式, 多打码不影响候选点质量。
@@ -121,13 +124,38 @@ _JS_REDACT = """
     boxes.push([r.left, r.top, r.width, r.height]);
   }
   const flame = /(flame|fire|streak|spark)/i;
+  const push = (el) => {
+    const r = el.getBoundingClientRect();
+    if (r.width < 4 || r.height < 4) return;
+    if (r.left > limitX || r.bottom < 0 || r.top > vh) return;
+    boxes.push([r.left, r.top, r.width, r.height]);
+  };
   for (const img of document.querySelectorAll('img')) {
-    const r = img.getBoundingClientRect();
-    if (r.width < 6 || r.height < 6) continue;
-    if (r.left > limitX || r.bottom < 0 || r.top > vh) continue;
     const s = String(img.src || img.getAttribute('src') || '');
     if (flame.test(s)) continue;      // 火花图标保留: 判定需要, 且与类名无关
-    boxes.push([r.left, r.top, r.width, r.height]);
+    push(img);
+  }
+  // 2026-11-19 补: 上面只盖了文本节点和 img, 以下四类像素同样能泄露内容 ——
+  //   input/textarea/select 的值不在文本节点里(输入框里正打着的话会被截进去);
+  //   canvas 是自绘(含"正在输入"动画等), video 是真画面;
+  //   CSS background-image 承载的头像/表情/贴纸在 SPA 里很常见。
+  // 一律盖住; 只对 background-image 放行 URL 命中火花关键词的(与 img 同一判据)。
+  for (const el of document.querySelectorAll(
+    'input, textarea, select, canvas, video'
+  )) {
+    push(el);
+  }
+  for (const el of document.querySelectorAll('*')) {
+    if (el.closest('#__spark_redact__')) continue;
+    let bg = '';
+    try {
+      bg = getComputedStyle(el).backgroundImage || '';
+    } catch (e) {
+      bg = '';
+    }
+    if (!bg || bg === 'none' || bg.indexOf('url(') < 0) continue;  // 跳过纯渐变
+    if (flame.test(bg)) continue;                                  // 火花底图保留
+    push(el);
   }
   const wrap = document.createElement('div');
   wrap.id = '__spark_redact__';

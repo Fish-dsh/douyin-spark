@@ -516,6 +516,24 @@ class TestHeadedConfigCheck(unittest.TestCase):
         ok, _ = self._cfg({"headless": True, "display": ":99"})
         self.assertFalse(ok)
 
+    def test_broken_json_fails(self):
+        """坏掉的 config.json 同样必须报失败。
+
+        此前两个分支(解析异常 / 顶层非对象)都 return True「跳过检查」, 与本类
+        第一条用例「无法核验 = 失败」自相矛盾: 文件坏掉和文件没写, 对有头模式
+        的后果一样 —— 都无从确认, 而 spark.py 可能正以 headless 跑着。"""
+        health_check.CONFIG_FILE.write_text("{ 这不是 JSON", encoding="utf-8")
+        ok, msg = health_check.check_headed_config()
+        self.assertFalse(ok)
+        self.assertIn("解析失败", msg)
+
+    def test_non_dict_json_fails(self):
+        """顶层是数组/字符串同样不能算通过。"""
+        health_check.CONFIG_FILE.write_text("[1, 2, 3]", encoding="utf-8")
+        ok, msg = health_check.check_headed_config()
+        self.assertFalse(ok)
+        self.assertIn("顶层不是对象", msg)
+
 
 class TestXvfbCheck(unittest.TestCase):
     """Xvfb 常驻服务检查。

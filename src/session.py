@@ -196,8 +196,9 @@ def free_page_memory(page: Page) -> None:
 def launch_browser(p, cfg: dict):
     """按 cfg 启动 chromium。
 
-    headless: 默认 True; 设 false 时以有头模式启动(用于 Xvfb/WSLg 虚拟显示,
-    规避抖音对 headless chromium 的登录拦截页, 2026-09-24 实测)。
+    headless: 默认 False, 即以有头模式启动(用 Xvfb/WSLg 虚拟显示), 规避抖音对
+    headless chromium 的登录拦截页 —— 2026-09-24 实测拦截, 2026-09-30 弱机
+    headless 渲染挂死导致漏发。仅当显式写死 "headless": true 才会走无头。
     display: 有头模式下注入 DISPLAY 环境变量(如板子 Xvfb :99)。
     perf_profile: low(板端档) / high(本机桌面档), 见 build_launch_args。
     """

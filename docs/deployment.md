@@ -1,15 +1,37 @@
 # 部署到 Linux 机器
 
-推荐：**在有屏幕的机器上登录一次生成 `runtime/storage.json`，再传给部署机**；部署机全程无人值守，靠 Xvfb 虚拟显示提供有头环境。
+推荐：**在有屏幕的机器上登录一次生成 `runtime/storage.json`，再单独传给部署机**；部署机全程无人值守，靠 Xvfb 虚拟显示提供有头环境。
 
-## 方式 A：本地 `login.py --password` → 传到部署机
+## 三类东西分开走，别混在一起同步
 
-1. 本地把账号密码填入 `.env`，跑 `python login.py --password`（有头会话）生成 `runtime/storage.json`。
-2. 把项目同步到部署机（仓库是公开版，同步时把 `runtime/` 一起带上，登录态就在里面；`REMOTE` 换成你自己的 `user@host`）：
+| 东西 | 是什么 | 怎么传 |
+| ---- | ------ | ------ |
+| 代码 | 仓库里的一切 | `git` / `rsync`，公网可下载 |
+| 登录态 | `runtime/storage.json`（cookie + localStorage） | **单独、加密、定向**：`scp`/`rsync` 到目标机，`chmod 600` |
+| 账号密码 | `config.json` 的 `accounts` | **不要跨机复制**，部署机自己填，`chmod 600` |
+| 账本 | `runtime/state.json`、`spark.log`、`.heal*` | 部署机自己生成，不复制 |
+
+**`runtime/` 一定不会被同步过去**：它整目录在 `.gitignore` 里，`git bundle` 只打包 Git 对象，`README` 的 `rsync` 也带 `--exclude runtime`。这不只是"少传了文件"—— 少了 `storage.json`，部署机首次运行会去扫码登录，而无人值守环境下那一步没人做，结果是**当晚静默零发送、直到第二天 01:45 巡检才知道**。
+
+## 方式 A：本地登录一次 → 只把登录态传过去
+
+1. **本机**（有屏幕的那台）把账号密码填入 `.env`（`cp .env.example .env && chmod 600 .env`，格式见文件内注释），跑 `python login.py --password`（有头会话）生成 `runtime/storage.json`。
+2. **代码**同步到部署机（`REMOTE` 换成你自己的 `user@host`）：
    ```bash
    git bundle create /tmp/spark-mirror.bundle --all && scp /tmp/spark-mirror.bundle REMOTE:/tmp/
    ssh REMOTE 'git -C /opt/douyin-spark fetch -q /tmp/spark-mirror.bundle "refs/heads/main:refs/remotes/localsrc/main" && git -C /opt/douyin-spark merge --ff-only refs/remotes/localsrc/main && chown -R USER:GROUP /opt/douyin-spark'
    ```
+   bundle 里**没有** `runtime/`（gitignored），这是对的 —— 登录态不该进版本历史。
+3. **登录态**单独传，别跟代码搅在一起：
+   ```bash
+   ssh REMOTE 'mkdir -p /opt/douyin-spark/runtime && chmod 700 /opt/douyin-spark/runtime'
+   scp runtime/storage.json REMOTE:/opt/douyin-spark/runtime/
+   ssh REMOTE 'chmod 600 /opt/douyin-spark/runtime/storage.json && chown USER:GROUP /opt/douyin-spark/runtime/storage.json'
+   ```
+4. **账号密码**在部署机的 `config.json` 里自己填（`accounts[].account/password`，`chmod 600 config.json`）。别把本机的 `config.json` scp 过去 —— 那样两台机器密码各改一次就漂了，而失效的那台只会在巡检时才暴露。
+5. 传完**先验证一次**再挂 cron：`ssh REMOTE 'cd /opt/douyin-spark && .venv/bin/python spark.py --dry-run'`，日志里该出现 `[login] 复用已保存登录态`，而不是跳登录页。
+
+> 无桌面 VPS 上 `login.py --manual` 起不来（没有 X 显示，浏览器窗口无处可去）。两条路：一是在本机/笔记本上登录一次，按上面第 3 步把 `storage.json` 传过去；二是在 VPS 上装 Xvfb 后跑 `login.py --manual`，用 `ssh -X` 把窗口转发到你本地屏幕扫码。
 
 账号需重新登录时，见 `docs/operations.md`「登录管理」。
 
@@ -18,7 +40,13 @@
 > 一键部署脚本已弃用并移除，当前按以下手动步骤部署：
 > 部署完逐项核对：代码同步（`git status` 应为干净）／时区（`timedatectl` 应为 Asia/Shanghai）／健康检查 cron（01:45）／当晚真机跑一次看日志收尾。
 
-1. 依赖：`python3 -m venv .venv && .venv/bin/pip install -r requirements.txt && .venv/bin/playwright install --with-deps chromium`（`--with-deps` 装 Chromium 需要的系统库，要 sudo；最小安装可用 `install chromium` 再自行补缺库）
+1. 依赖（**分两步，只有第一步要 sudo**）：
+   ```bash
+   python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
+   sudo .venv/bin/playwright install-deps chromium      # 系统库 apt 安装, 需要 root
+   .venv/bin/playwright install chromium                # 浏览器本体, 装进当前用户家目录
+   ```
+   `install --with-deps chromium` 一步也能装完，但它会把「下载浏览器」也塞进 root 的 `~/.cache/ms-playwright`，之后普通用户跑 cron 反而找不到浏览器；上面两步分开就没有这个坑。
 2. 准备 `config.json`（自动发现、`send_window` 对齐 cron；`headless` 必须 `false`）。`engine` 字段已废弃，代码不读，别写。
 3. **git 兜底**：项目已是 git 仓库。scp 整目录会带上 `.git`；若只传代码文件，部署机上执行 `git init && git add -A && git commit -m "chore: import"`。
 4. 部署机上配 cron：`crontab -e` 写入 `0 0 * * * /opt/douyin-spark/run_cron.sh`，并确保脚本可执行：`chmod +x /opt/douyin-spark/run_cron.sh && chown -R USER:GROUP /opt/douyin-spark`（**scp/覆盖更新脚本会丢 x 位，cron 调用将 Permission denied 且无日志，务必校验**）。
@@ -71,4 +99,4 @@ cron 每天 00:00 调用包装脚本 `run_cron.sh`：
 
 - **本地先跑通**：编译、`--dry-run`、单测都在本地虚拟环境里做（`python -m venv .venv && .venv/bin/pip install -r requirements.txt`），跑通后再同步到部署机。
 - **版本要对齐**：本地与部署机 Python 版本可能不同，涉及版本相关行为的改动，以部署机真机复验一次为准。
-- **同步方式自选**：`git bundle` + `scp`、`rsync`、`git pull` 都行，关键是 `runtime/`（登录态与账本）跟着走、脚本保留可执行位。
+- **同步方式自选，但代码和登录态分两趟**：代码走 `git bundle` / `rsync` / `git pull` 都行；`runtime/storage.json` 单独 `scp` 并 `chmod 600`，**账本**（`state.json` / `spark.log`）留在部署机自己生成，别反向覆盖回去。脚本的可执行位要保（`rsync` 加 `-a`，或传完 `chmod +x`）。

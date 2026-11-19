@@ -86,6 +86,37 @@ class TestVisionEnabled(unittest.TestCase):
             self.assertTrue(vision_enabled())
 
 
+class TestRedactionScript(unittest.TestCase):
+    """脱敏脚本的覆盖面(结构性断言: 无浏览器环境, 只能查脚本内容)。
+
+    真正的像素效果要靠真机截图核验; 这里守的是「后来的人别把某类可泄露元素
+    的遮罩删掉」—— 2026-11-19 两轮都是漏了某一类(先是右侧会话, 再是输入框/
+    canvas/video/背景图), 全是靠人工看图才发现的。
+    """
+
+    def test_covers_whole_viewport(self):
+        """遮罩边界必须是整个视口。曾经是 vw * 0.45, 右侧已打开的会话明文外发。"""
+        from src.vision import _JS_REDACT
+
+        self.assertIn("const limitX = vw;", _JS_REDACT)
+        self.assertNotIn("vw * 0.45", _JS_REDACT)
+
+    def test_covers_elements_without_text_nodes(self):
+        """输入框的值不在文本节点里, canvas/video/背景图也不在 —— 必须单独盖。"""
+        from src.vision import _JS_REDACT
+
+        for sel in ("input", "textarea", "select", "canvas", "video"):
+            self.assertIn(sel, _JS_REDACT, f"脱敏脚本漏了 {sel}")
+        self.assertIn("backgroundImage", _JS_REDACT)
+
+    def test_keeps_flame_icon(self):
+        """火花图标必须留着: 行定位与「有没有火花」的判定都靠它。"""
+        from src.vision import _JS_REDACT
+
+        self.assertIn("flame", _JS_REDACT)
+        self.assertIn("if (flame.test(s)) continue;", _JS_REDACT)
+
+
 class TestLocateRows(unittest.TestCase):
     def test_happy_path(self):
         page = FakePage(rows=_ROWS)

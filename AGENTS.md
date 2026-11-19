@@ -8,7 +8,7 @@
 
 ## 硬约束（改代码前先记住）
 
-1. **`headless` 必须为 `false`**，跑在 Xvfb `:99` 上。改成无头 = 抖音拦 + 弱机渲染挂死，`src/health_check.py::check_headed_config` 会断言，测试也会失败。
+1. **`headless` 必须为 `false`**，跑在 Xvfb `:99` 上。改成无头 = 抖音拦 + 弱机渲染挂死。三道闸：`src/config.py::load_config` 缺键补 `false` 并告警、`src/session.py::launch_browser` 默认有头、`src/health_check.py::check_headed_config` 断言（**无法核验也算失败**：没配置/坏 JSON/顶层不是对象一律 FAIL）。`spark.py` 入口不硬拒 —— 桌面调试要能显式写 `headless: true`，闸门放在巡检那一侧。
 2. **不要新增 LLM / 外部 API 依赖到发送主链路**。自愈曾经由 LLM 改源码实现，实盘从未成功过一次，已经降级成「错误分类 → 本地策略表 → 告警」（零网络）。
    现存唯一的模型调用是 `src/vision.py`（视觉兜底，默认开、无 key 自动空转），只在四条 DOM 策略全失效时触发，且**绝不盲点模型坐标**（坐标一律由本地 DOM 现场核对）。不要把它扩大成主链路。
 3. **不碰验证码**。`src/stealth.py` 只伪装自动化特征（`navigator.webdriver` 之类），撞到滑块就退避等下一晚。

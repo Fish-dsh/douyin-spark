@@ -142,17 +142,31 @@ def _pid_alive(pid: int) -> bool:
         return False
     if os.name == "nt":
         import ctypes
+        from ctypes import wintypes
 
         process_query_limited_information = 0x1000
         still_active = 259
-        kernel32 = ctypes.windll.kernel32
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        # 必须显式声明签名: 不写 restype 时 ctypes 按 32 位 int 收回返回值, 而
+        # HANDLE 是指针宽度 —— 64 位下句柄被截断, 后续 GetExitCodeProcess /
+        # CloseHandle 拿到的是一个无效句柄。原来能跑只是运气(低位常不为 0),
+        # 而 CloseHandle 拿到截断值会静默失败, 句柄泄漏。
+        kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        kernel32.OpenProcess.restype = wintypes.HANDLE
+        kernel32.GetExitCodeProcess.argtypes = [
+            wintypes.HANDLE,
+            ctypes.POINTER(wintypes.DWORD),
+        ]
+        kernel32.GetExitCodeProcess.restype = wintypes.BOOL
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+        kernel32.CloseHandle.restype = wintypes.BOOL
         handle = kernel32.OpenProcess(
             process_query_limited_information, False, pid
         )
         if not handle:
             return False
         try:
-            code = ctypes.c_ulong()
+            code = wintypes.DWORD()
             ok = kernel32.GetExitCodeProcess(handle, ctypes.byref(code))
             return bool(ok) and code.value == still_active
         finally:
