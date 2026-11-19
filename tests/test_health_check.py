@@ -711,6 +711,39 @@ class TestXvfbCheck(unittest.TestCase):
         self.assertEqual(state, "fail")
         self.assertIn("xvfb", msg)
 
+    def test_blank_display_without_env_skips(self):
+        """配置留空、环境也没有 DISPLAY —— 连该查哪个 socket 都不知道。
+
+        这时 systemctl 说 active 只能证明「某个 Xvfb 在跑」, 证明不了浏览器会用上
+        它。旧版在这种情况下不查 socket 直接报 ok, 把「没核验」记成了「正常」。
+        """
+        self._write_config("")
+        with patch.dict(os.environ, {"DISPLAY": ""}):
+            state, msg = self._run()
+        self.assertEqual(state, "skip")
+        self.assertIn("DISPLAY", msg)
+
+    def test_blank_display_falls_back_to_env(self):
+        """配置留空是有头门禁允许的, 含义是「用当前进程的 DISPLAY」。
+
+        run_dev.sh 在桌面机上就是这条路 (config.dev.json 的 display 为 null)。检查项
+        必须走同一套回落, 否则会去查一个根本不存在的显示号。
+        """
+        self._write_config("")
+        (self.sockets / "X0").write_text("", encoding="utf-8")
+        with patch.dict(os.environ, {"DISPLAY": ":0"}):
+            state, msg = self._run()
+        self.assertEqual(state, "ok")
+        self.assertIn(":0", msg)
+
+    def test_env_display_without_socket_fails(self):
+        """回落来的显示号同样要查 socket —— 回落的不是「跳过检查」。"""
+        self._write_config("")
+        with patch.dict(os.environ, {"DISPLAY": ":0"}):
+            state, msg = self._run()
+        self.assertEqual(state, "fail")
+        self.assertIn("X0", msg)
+
 
 class TestRunInProgressGate(unittest.TestCase):
     """任务还没跑完就不下结论(判定过早 = 假告警 = 告警疲劳)。

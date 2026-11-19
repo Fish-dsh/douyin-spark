@@ -29,21 +29,32 @@
 旧版只看关键词, 普通头像 URL 撞上 `spark` 就被整块放行, 等于没打码。
 
 **所有扫描都进 open shadow root**(会话项里有 shadow host, 只从 `document.body` 起
-`querySelectorAll` 会把整片 shadow DOM 漏掉, 而返回的计数照样漂亮)。闭包 shadow
-root 拿不到, 属于已知残留风险。
+`querySelectorAll` 会把整片 shadow DOM 漏掉, 而返回的计数照样漂亮)。
 
-**覆盖闸门**(三道, 任一不过就放弃截图并退回 DOM 取证 —— 脱敏链上"看着成功其实
+**读不到的组件整块盖住**: `el.shadowRoot` 为 null 无法区分「没有 shadow DOM」与
+「用了闭合(closed) shadow root」。对能确认内容不来自 light DOM 的宿主 —— 自定义
+元素(标签名含连字符)、无 open shadow root、自身没有子节点、却有渲染尺寸 —— 一律
+整块遮罩并计入 `unreadable`。闭合 root 里若有火花图标会被一起盖掉, 这是有意的:
+宁可这次定位失败退回 DOM 取证, 也不把读不到的内容发出去。
+
+**覆盖闸门**(四道, 任一不过就放弃截图并退回 DOM 取证 —— 脱敏链上"看着成功其实
 什么都没做"是最坏的一种失败, 因为它不报错):
 
-  1. 脚本必须回报结构化结果 `{masked, textNodes, uncovered, keptFlame}`;
+  1. 脚本必须回报结构化结果
+     `{masked, textNodes, uncovered, unverified, unreadable, keptFlame}`;
   2. `masked > 0`: 一处都没遮, 说明这次遍历根本没找到东西(骨架屏/改版/空白页);
-  3. `uncovered == 0`: 拿遮罩元素**渲染后**的矩形去复核文本矩形中心点。
+  3. `uncovered == 0`: 拿遮罩元素**渲染后**的矩形复核对**每一个**文本矩形 ——
+     遮罩矩形栅格化到 2px 网格, 要求矩形(内缩 1px)覆盖到的网格点全部被占住。
      `position:fixed` 落在被 `transform`/`filter` 的祖先里时会相对那个祖先定位 ——
-     那时数组是对的、屏幕上是错的。只判 `masked > 0` 抓不到这种「加了没盖上」。
+     那时数组是对的、屏幕上是错的。只判 `masked > 0` 抓不到这种「加了没盖上」,
+     只判矩形中心点也抓不到「中间盖住了、上下露着」;
+  4. `unverified == 0`: 覆盖复核有计算预算(防超大 DOM 卡死主线程), 预算耗尽时
+     剩下的文本块是「没验证过」而不是「盖住了」。无法证明就必须放弃截图。
 
 历次修正都发生在 2026-11-19: 最初只盖左栏 45%(右侧会话明文外发) → 补输入框/
 canvas/video/背景图 → 补 shadow DOM / iframe / 伪元素 / 覆盖闸门 → 非文本扫描也走
-shadow root、补 mask/border-image 与 SVG 位图、火花放行收窄、加覆盖自检。昵称不来自
+shadow root、补 mask/border-image 与 SVG 位图、火花放行收窄、加覆盖自检 → 覆盖自检
+从「抽样看中心点」改成「全量逐点 + 预算兜底」、闭合 shadow 宿主整块盖。昵称不来自
 模型, 它由本地 DOM 回填, 故打码不影响功能。以后新增任何可视元素, 都该按「会不会把
 用户内容画进截图」重新过一遍。
 
@@ -254,6 +265,26 @@ _JS_REDACT = r"""
       pushEl(el);
     }
   }
+  // 4) 读不到的组件。`el.shadowRoot` 为 null 既可能是「根本没有 shadow DOM」,
+  //    也可能是「用了闭合(closed) shadow root」—— 两者在脚本里无法区分, 而闭合 root
+  //    里的昵称/头像不会进 roots, 前面三条扫描一个都命中不了它, 计数却照样漂亮。
+  //    兜底只针对能确认「内容不是来自 light DOM」的宿主: 自定义元素(标签名含连字符)、
+  //    没有 open shadow root、自身没有子节点、却有渲染尺寸。这种宿主整块盖住。
+  //    闭合 root 里若藏着火花图标, 它会一起被盖掉 —— 这是有意的选择: 宁可这次定位
+  //    失败退回 DOM 取证, 也不把读不到的内容发出去。
+  let unreadable = 0;
+  for (const root of roots) {
+    for (const el of root.querySelectorAll('*')) {
+      if (inOverlay(el)) continue;
+      if (String(el.tagName || '').indexOf('-') < 0) continue;
+      if (el.shadowRoot) continue;
+      if (el.childNodes && el.childNodes.length > 0) continue;
+      const r = el.getBoundingClientRect();
+      if (!visible(r) || r.width < 4 || r.height < 4) continue;
+      unreadable++;
+      push(r);
+    }
+  }
   const wrap = document.createElement('div');
   wrap.id = '__spark_redact__';
   wrap.style.cssText =
@@ -269,24 +300,61 @@ _JS_REDACT = r"""
   // 覆盖自检: 拿遮罩元素**渲染后**的矩形去复核文本矩形, 而不是拿 boxes 数组自证。
   // position:fixed 落在被 transform/filter 的祖先里时会相对那个祖先定位 —— 那时
   // 数组是对的、屏幕上是错的。这一步把这种「看着加了遮罩其实没盖上」抓出来。
-  // 只复核前 400 个文本矩形: 会话列表的 DOM 规模下, 全量 O(n*m) 没有必要。
+  //
+  // 2026-11-19 再收紧: 旧版只复核前 400 个文本矩形、且只判矩形**中心点**落没落在
+  // 某个遮罩里 —— 超出 400 的那批完全不验证, 而矩形中心被盖住、上下却露出同样算通过。
+  // 现在把遮罩矩形栅格化到 2px 网格, 对**每一个**文本矩形要求(内缩 1px 容忍亚像素
+  // 圆整)其覆盖范围内的网格点**全部**被遮罩占住。工作量用预算兜底: 预算耗尽不是
+  // 「通过」而是 unverified —— 脱敏链上「没法证明盖住了」必须等于「放弃这次截图」。
   const maskRects = [];
   for (const d of wrap.children) maskRects.push(d.getBoundingClientRect());
-  const covers = (r) => {
-    const cx = r.left + r.width / 2, cy = r.top + r.height / 2;
-    for (const m of maskRects) {
-      if (cx >= m.left - 1 && cx <= m.right + 1 &&
-          cy >= m.top - 1 && cy <= m.bottom + 1) return true;
+  const CELL = 2, INSET = 1;
+  const gw = Math.max(1, Math.ceil(vw / CELL)), gh = Math.max(1, Math.ceil(vh / CELL));
+  const grid = new Uint8Array(gw * gh);
+  for (const m of maskRects) {
+    const x0 = Math.max(0, Math.floor(m.left / CELL));
+    const x1 = Math.min(gw - 1, Math.ceil(m.right / CELL) - 1);
+    const y0 = Math.max(0, Math.floor(m.top / CELL));
+    const y1 = Math.min(gh - 1, Math.ceil(m.bottom / CELL) - 1);
+    if (x1 < x0 || y1 < y0) continue;              // 整块在视口外
+    for (let y = y0; y <= y1; y++) {
+      const row = y * gw;
+      for (let x = x0; x <= x1; x++) grid[row + x] = 1;
     }
-    return false;
+  }
+  let uncovered = 0, unverified = 0, budget = 4000000;
+  const fullyCovered = (r) => {
+    let x0 = Math.floor((r.left + INSET) / CELL);
+    let x1 = Math.floor((r.right - INSET) / CELL);
+    let y0 = Math.floor((r.top + INSET) / CELL);
+    let y1 = Math.floor((r.bottom - INSET) / CELL);
+    if (x1 < x0 || y1 < y0) {                      // 比 INSET 还小的碎块: 退回中心点
+      x0 = x1 = Math.floor((r.left + r.width / 2) / CELL);
+      y0 = y1 = Math.floor((r.top + r.height / 2) / CELL);
+    }
+    x0 = Math.max(0, x0); x1 = Math.min(gw - 1, x1);
+    y0 = Math.max(0, y0); y1 = Math.min(gh - 1, y1);
+    if (x1 < x0 || y1 < y0) return true;           // 整块在视口外, 看不见不算漏
+    for (let y = y0; y <= y1; y++) {
+      const row = y * gw;
+      for (let x = x0; x <= x1; x++) {
+        if (budget-- <= 0) return null;            // 预算耗尽, 交给调用方记 unverified
+        if (!grid[row + x]) return false;
+      }
+    }
+    return true;
   };
-  let uncovered = 0;
-  const checkN = textRects.length < 400 ? textRects.length : 400;
-  for (let i = 0; i < checkN; i++) if (!covers(textRects[i])) uncovered++;
+  for (let i = 0; i < textRects.length; i++) {
+    const ok = fullyCovered(textRects[i]);
+    if (ok === null) { unverified = textRects.length - i; break; }
+    if (!ok) uncovered++;
+  }
   return {
     masked: boxes.length,
     textNodes: textRects.length,
     uncovered: uncovered,
+    unverified: unverified,
+    unreadable: unreadable,
     keptFlame: keptFlame
   };
 }
@@ -421,12 +489,16 @@ def _inject_redaction(page) -> bool:
     True, 于是 /_redacted_screenshot 拍下一张**完全没打码**的整屏, 直接发给外部
     模型。脱敏链路上"看着成功其实什么都没做"是最坏的一种失败: 它静默。
 
-    所以这里有三道闸门, 任何一道不过就放弃截图, 让调用方退回 DOM 取证:
-      1) 脚本必须回报一个结构化结果(masked/textNodes/uncovered/keptFlame);
+    所以这里有四道闸门, 任何一道不过就放弃截图, 让调用方退回 DOM 取证:
+      1) 脚本必须回报一个结构化结果
+         (masked/textNodes/uncovered/unverified/unreadable/keptFlame);
       2) masked 必须 > 0 —— 一处都没遮说明这次遍历根本没找到东西;
-      3) uncovered 必须 == 0 —— 遮罩元素渲染后的矩形没盖住某个文本矩形的中心点,
-         最常见的原因是 position:fixed 的遮罩落在了被 transform/filter 的祖先里,
-         于是"数组里加了、屏幕上没盖"。这种情况不放弃就等于外发明文。
+      3) uncovered 必须 == 0 —— 遮罩元素**渲染后**的矩形必须覆盖每个文本矩形
+         (2px 栅格逐点判定, 不是只看中心点), 最常见的原因是 position:fixed 的
+         遮罩落在了被 transform/filter 的祖先里, 于是"数组里加了、屏幕上没盖";
+      4) unverified 必须 == 0 —— 覆盖复核有计算预算, 预算耗尽时剩下的文本块是
+         "没验证过"而不是"盖住了"。旧版直接把超出 400 个的部分当通过, 等于在
+         最该保守的地方乐观。脱敏链上"没法证明盖住了"必须等于"放弃这次截图"。
     """
     try:
         n = page.evaluate(_JS_REDACT)
@@ -439,6 +511,8 @@ def _inject_redaction(page) -> bool:
     try:
         masked = int(n.get("masked", 0))
         uncovered = int(n.get("uncovered", 0))
+        unverified = int(n.get("unverified", 0))
+        unreadable = int(n.get("unreadable", 0))
         text_nodes = int(n.get("textNodes", 0))
         kept = int(n.get("keptFlame", 0))
     except (TypeError, ValueError):
@@ -454,9 +528,16 @@ def _inject_redaction(page) -> bool:
             "放弃本次截图"
         )
         return False
+    if unverified > 0:
+        log(
+            f"[vision] 有 {unverified} 个文本块的覆盖没能在预算内复核完"
+            "(会话列表过大), 无法证明已盖住, 放弃本次截图"
+        )
+        return False
     log(
         f"[vision] 已注入脱敏遮罩 {masked} 处"
-        f"(文本节点 {text_nodes}, 保留火花图标 {kept}), 复核覆盖完整"
+        f"(文本节点 {text_nodes}, 读不到的组件 {unreadable}, 保留火花图标 {kept}), "
+        "复核每个文本矩形都被盖住"
     )
     return True
 

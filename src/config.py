@@ -114,8 +114,15 @@ def load_config() -> dict:
             "警告: headless 不为 false。headless 会被抖音拦截页挡住、弱机还会渲染挂死,"
             " 只适合桌面档临时调试; 无人值守必须 headless=false 且 display=\":99\""
         )
-    elif not cfg.get("display"):
-        log("警告: headless=false 但没有 display, 有头模式下将没有 X 显示可用")
+    else:
+        # 这里必须复用 preflight 的同一套判据: display 留空是**合法**的(含义是用
+        # 当前进程的 DISPLAY), 只有「配置留空且环境也没有合法 DISPLAY」才是真问题。
+        # 旧写法只判 cfg.get("display"), 于是 config.dev.json(display: null) 在桌面
+        # 会话里每跑一次就警告一次「将没有 X 显示可用」, 而那一刻浏览器明明能开窗口。
+        # 假警告比不警告更坏: 它会训练人无视所有警告。
+        problem = _display_refusal(cfg)
+        if problem:
+            log(f"警告: {problem}")
     if "accounts" not in cfg:
         log("警告: config.json 缺少 accounts 字段，使用空列表")
         cfg["accounts"] = []

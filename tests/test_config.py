@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import io
 import json
+import os
 import tempfile
 import unittest
+from contextlib import redirect_stdout
 from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch
@@ -93,6 +96,40 @@ class TestLoadConfig(unittest.TestCase):
         with patch("src.config.CONFIG_FILE", self.config_path):
             cfg = load_config()
         self.assertTrue(cfg["headless"])
+
+    def test_blank_display_without_env_warns(self):
+        """配置留空 display 且环境也没有 DISPLAY —— 这才是真问题, 必须告警。"""
+        self.config_path.write_text(
+            json.dumps({"send_window": {}, "headless": False}), encoding="utf-8"
+        )
+        buf = io.StringIO()
+        with (
+            patch("src.config.CONFIG_FILE", self.config_path),
+            patch.dict(os.environ, {"DISPLAY": ""}),
+            redirect_stdout(buf),
+        ):
+            load_config()
+        self.assertIn("display", buf.getvalue())
+
+    def test_blank_display_with_env_does_not_warn(self):
+        """桌面机 (display: null + DISPLAY=:0) 不该每次启动都警告一次。
+
+        config.dev.json 就是这种配置。旧版只判 cfg.get("display") 的真假, 于是这
+        台机器每跑一次 run_dev.sh 都被告知「将没有 X 显示可用」—— 而那一刻浏览器
+        明明能开窗。假警告会把所有警告一起变成噪音。
+        """
+        self.config_path.write_text(
+            json.dumps({"send_window": {}, "headless": False}), encoding="utf-8"
+        )
+        buf = io.StringIO()
+        with (
+            patch("src.config.CONFIG_FILE", self.config_path),
+            patch.dict(os.environ, {"DISPLAY": ":0"}),
+            redirect_stdout(buf),
+        ):
+            load_config()
+        self.assertNotIn("没有 X 显示", buf.getvalue())
+        self.assertNotIn("display", buf.getvalue())
 
     def test_invalid_json_exits(self):
         self.config_path.write_text("not valid json", encoding="utf-8")

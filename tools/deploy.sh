@@ -68,12 +68,23 @@ assert_clean() {
     #   .env 后面用 (\.[^/]*)? 而不是 \.[a-z]+ —— 多段名字(.env.production.local)
     #   是真实存在的写法, 老写法只匹配一段, 漏过去就是口令上网。
     #   凭据文件名也不止 .env/storage.json: Playwright 的 cookies.json、GCP 的
-    #   credentials.json、各种 id_* 私钥都是同一个后果。
+    #   credentials.json、各种私钥都是同一个后果。
+    #
+    #   私钥按两条规则一起卡, 缺哪条都能漏:
+    #     a) 文件名 id_* 一律拦 —— 不再只列 id_rsa/id_dsa/id_ecdsa/id_ed25519 四个
+    #        精确名。ssh-keygen -t ed25519-sk 生成的是 id_ed25519_sk, 开发者自己
+    #        改名成 id_work 的也常见, 白名单式精确名对它们全失效。
+    #     b) 扩展名 .pem / .key 一律拦 —— 证书私钥、导出的 kubeconfig 私钥、
+    #        openssl 产物通常走这两个后缀, 文件名毫无规律。
+    #   仓库里现在没有任何 .pem / .key 文件, 所以放宽这两条不会误伤已提交的文件;
+    #   真需要放行某个模板时, 往下面那条白名单 grep 里加即可。
     local pat
     pat='(^|/)(\.env(\.[^/]*)?|storage\.json|state\.json|auth\.json'
-    pat="$pat"'|credentials\.json|cookies?\.json|id_rsa|id_dsa|id_ecdsa|id_ed25519)$'
+    pat="$pat"'|credentials\.json|cookies?\.json|id_[a-z0-9_]*)\.?$'
+    pat="$pat"'|\.(pem|key|p12|pfx)$'
     bad="$(tar -tzf "$1" | grep -Ei "$pat" \
-        | grep -Eiv '\.env\.(example|sample|template)$' || true)"
+        | grep -Eiv '(\.env\.(example|sample|template)|\.(pem|key)\.example)$' \
+        || true)"
     if [ -n "$bad" ]; then
         echo "[deploy][ERROR] 压缩包里混进了不该上传的文件, 已中止:" >&2
         echo "$bad" | sed 's/^/    /' >&2

@@ -32,8 +32,9 @@ _ROWS = [
 class FakePage:
     """最小页面替身: evaluate 分「脱敏(单参)」与「取证(带参)」两种返回。
 
-    脱敏分支现在回报结构化对象(masked/textNodes/uncovered/keptFlame), 不再是
-    一个裸计数 —— 覆盖自检需要「遮了几处」与「还有几处没被盖住」两个数。
+    脱敏分支现在回报结构化对象(masked/textNodes/uncovered/unverified/
+    unreadable/keptFlame), 不再是一个裸计数 —— 覆盖自检既要「遮了几处」,
+    也要「还有几处没被盖住」「有几处没验证完」。
     """
 
     def __init__(self, rows=None, screenshot_ok=True, redact=None):
@@ -43,6 +44,8 @@ class FakePage:
             "masked": 3,
             "textNodes": 3,
             "uncovered": 0,
+            "unverified": 0,
+            "unreadable": 0,
             "keptFlame": 1,
         }
 
@@ -177,6 +180,30 @@ class TestRedactionScript(unittest.TestCase):
         self.assertIn("uncovered", _JS_REDACT)
         self.assertIn("getBoundingClientRect()", _JS_REDACT)
         self.assertIn("maskRects", _JS_REDACT)
+
+    def test_coverage_check_is_not_sampled(self):
+        """旧版只复核前 400 个文本矩形, 超出的那批完全不验证。
+
+        会话列表动辄几百个文本节点, 抽样等于给最该保守的一步开了后门。现在按
+        2px 栅格逐点判定, 并用计算预算兜底 —— 预算耗尽报 unverified, 不是通过。
+        """
+        from src.vision import _JS_REDACT
+
+        self.assertNotIn("checkN", _JS_REDACT)
+        self.assertNotIn("< 400", _JS_REDACT)
+        self.assertIn("unverified", _JS_REDACT)
+
+    def test_masks_components_it_cannot_read(self):
+        """闭合 shadow root 里的内容永远拿不到, 只能整块盖住宿主。
+
+        `el.shadowRoot` 为 null 无法区分「没有 shadow DOM」与「闭合 shadow root」。
+        对能确认内容不来自 light DOM 的自定义元素宿主, 打码是唯一安全答案。
+        """
+        from src.vision import _JS_REDACT
+
+        self.assertIn("unreadable", _JS_REDACT)
+        self.assertIn("indexOf('-')", _JS_REDACT)
+
     def test_walks_open_shadow_roots(self):
         """shadow DOM 里的文本 createTreeWalker(document.body) 走不进去。
 
@@ -213,11 +240,13 @@ class TestRedactionGate(unittest.TestCase):
     """
 
     @staticmethod
-    def _ret(masked=3, text_nodes=3, uncovered=0, kept=1):
+    def _ret(masked=3, text_nodes=3, uncovered=0, kept=1, unverified=0, unreadable=0):
         return {
             "masked": masked,
             "textNodes": text_nodes,
             "uncovered": uncovered,
+            "unverified": unverified,
+            "unreadable": unreadable,
             "keptFlame": kept,
         }
 
@@ -308,6 +337,37 @@ class TestRedactionGate(unittest.TestCase):
             self.assertEqual(out, "")
             self.assertEqual(list(Path(td).glob("*.png")), [])
         page.screenshot.assert_not_called()
+
+    def test_unverified_text_is_failure(self):
+        """预算耗尽 = 没验证完, 不是通过。旧版把超出抽样范围的部分当盖住了。"""
+        from src import vision
+
+        self.assertFalse(
+            vision._inject_redaction(self._page(self._ret(unverified=17)))
+        )
+
+    def test_unverified_aborts_screenshot(self):
+        from src import vision
+
+        page = MagicMock()
+        page.evaluate.return_value = self._ret(unverified=5)
+        with (
+            tempfile.TemporaryDirectory() as td,
+            patch("src.vision._SHOT_DIR", Path(td)),
+        ):
+            self.assertEqual(vision._redacted_screenshot(page), "")
+            self.assertEqual(list(Path(td).glob("*.png")), [])
+        page.screenshot.assert_not_called()
+
+    def test_unreadable_components_do_not_block(self):
+        """读不到的组件被整块盖住了, 那是处理过而不是没处理 —— 不该算失败。"""
+        from src import vision
+
+        self.assertTrue(
+            vision._inject_redaction(self._page(self._ret(unreadable=4)))
+        )
+
+
 class TestLocateRows(unittest.TestCase):
     def test_happy_path(self):
         page = FakePage(rows=_ROWS)

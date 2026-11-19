@@ -469,16 +469,27 @@ def check_headed_config() -> tuple[bool, str]:
     )
 
 
-def _configured_display() -> str:
-    """从 config.json 读出配置的 display; 读不出来返回空串。"""
+def _configured_display() -> tuple[str, str]:
+    """实际生效的 display 与它的来源。返回 (显示号, 来源), 拿不到就 ("", "")。
+
+    配置里留空 display 不是「没配置」—— src/config.py 的有头门禁允许这种情况,
+    含义是「用当前进程的 DISPLAY」。这里必须用同一套回落逻辑, 否则会出现最坏的
+    组合: 配置留空、实际跑在 :0、而 Xvfb 检查去查了一个根本不存在的显示号, 或者
+    干脆什么 socket 都不查、只凭 systemctl 说 active 就报 ok。
+    """
     try:
         cfg = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
     except Exception:
-        return ""
+        return "", ""
     if not isinstance(cfg, dict):
-        return ""
+        return "", ""
     display = cfg.get("display")
-    return display.strip() if isinstance(display, str) else ""
+    if isinstance(display, str) and display.strip():
+        return display.strip(), "config"
+    env_display = (os.environ.get("DISPLAY") or "").strip()
+    if _DISPLAY_RE.match(env_display):
+        return env_display, "env"
+    return "", ""
 
 
 def check_xvfb_display() -> tuple[str, str]:
@@ -497,20 +508,36 @@ def check_xvfb_display() -> tuple[str, str]:
     True「跳过」, 调用方看到的是和真通过一样的布尔值 —— 一个无从核验的环境
     就被记成了健康。这里把三态分开: 有证据通过才 ok, 有证据不对才 fail,
     其余一律 skip, 由调用方显式打印「未核验」而不是混进「正常」。
+
+    显示号本身也可以来自环境变量: config.json 里 display 留空是有头门禁允许的
+    (含义是「用当前进程的 DISPLAY」)。所以这里跟 src/config.py 用同一套回落顺序
+    —— 先配置、再环境 —— 并且两边都找不到时返回 skip: 连该查哪个 socket 都不
+    知道的情况下, 只看 systemctl 的 active 会把「某个 Xvfb 在跑」误当成
+    「浏览器会用上它」。
     """
     if not CONFIG_FILE.is_file():
         return "skip", "config.json 不存在, 未核验 Xvfb(先 cp config.example.json config.json)"
-    display = _configured_display()
+    display, source = _configured_display()
     socket_ok = False
     socket_name = ""
     if display:
         socket_name = "X" + display.lstrip(":").split(".")[0]
         socket_ok = (_X11_SOCKET_DIR / socket_name).exists()
+    if not display:
+        # 配置留空且环境也没有合法 DISPLAY —— 连「该查哪个 socket」都不知道。
+        # 这时 systemctl 说 active 也不能算 ok: 那只能证明某个 Xvfb 在跑,
+        # 证明不了浏览器会用上它。
+        return "skip", (
+            "config.json 的 display 为空, 环境也没有可用的 DISPLAY, "
+            "无法确定该查哪个 X socket, 未核验 Xvfb"
+            "(部署机应把 display 配成 \":99\")"
+        )
+    where = f"{display}(来自{source})" if source == "env" else display
     if shutil.which("systemctl") is None:
         if socket_ok:
             return "ok", f"无 systemctl, 但 {_X11_SOCKET_DIR}/{socket_name} 存在"
         return "skip", (
-            "无 systemctl 且没有 X socket, 未核验 Xvfb"
+            f"无 systemctl 且 {_X11_SOCKET_DIR}/{socket_name} 不存在, 未核验 Xvfb"
             "(开发机正常现象; 部署机上这项必须能核验)"
         )
     try:
@@ -532,19 +559,16 @@ def check_xvfb_display() -> tuple[str, str]:
                 "(启动: systemctl start xvfb)"
             ),
         )
-    if display and not socket_ok:
+    if not socket_ok:
         return (
             "fail",
             (
-                f"xvfb.service 报 active, 但配置的 display={display} 没有对应 socket "
+                f"xvfb.service 报 active, 但 display={where} 没有对应 socket "
                 f"({_X11_SOCKET_DIR}/{socket_name} 不存在); "
                 "多半是 unit 在崩溃重启, 或者 display 配错了显示号"
             ),
         )
-    return "ok", (
-        f"xvfb.service active (display={display or '未配置'}, "
-        f"socket={'有' if socket_ok else '未核验'})"
-    )
+    return "ok", f"xvfb.service active (display={where}, socket={socket_name} 有)"
 
 
 # 注: 早期还有一个「记档对账」检查项, 依赖维护者的私有工作日志工具, 与本项目运行无关,
