@@ -9,11 +9,15 @@ from unittest.mock import MagicMock, patch
 
 from src import vision_cv
 from src.sender import (
+    _JS_CLEAR_BOX,
+    _JS_INJECT_AND_SEND,
+    _JS_READ_BOX_TEXT,
     SEND_BUTTON_SELECTORS,
     click_friend,
     confirm_send,
     cv_send_fallback,
     last_bubble_is_self,
+    normalize_box_text,
     press_enter,
     send_message,
     send_sticker,
@@ -761,3 +765,211 @@ class TestLastBubbleIsSelf(unittest.TestCase):
         page = MagicMock()
         page.evaluate.side_effect = RuntimeError("boom")
         self.assertIsNone(last_bubble_is_self(page))
+
+
+def _input_fake(inject_results, box_texts, *, order=None):
+    """按脚本特征分发 page.evaluate 替身(输入链路专用)。
+
+    inject_results: _JS_INJECT_AND_SEND 依次返回的结果, 用尽后重复最后一个;
+                    元素是 Exception 实例时抛出(模拟 JS 抛异常)。
+    box_texts:      _JS_READ_BOX_TEXT 依次返回的框内文本, 用尽后重复最后一个。
+    order:          若给出, 每次调用把脚本名 append 进去(用来断言调用顺序)。
+    """
+
+    def pick(seq):
+        out = seq.pop(0) if len(seq) > 1 else seq[0]
+        if isinstance(out, Exception):
+            raise out
+        return out
+
+    inj = list(inject_results)
+    txt = list(box_texts)
+
+    def fake(js, *args):
+        if "insertText" in js and "content_mismatch" in js:  # _JS_INJECT_AND_SEND
+            name, seq = "inject", inj
+        elif "execCommand('delete'" in js:  # _JS_CLEAR_BOX
+            name, seq = "clear", [{"ok": True, "cleared": True}]
+        elif "if (!box) return null;" in js:  # _JS_READ_BOX_TEXT
+            name, seq = "read", txt
+        else:
+            raise AssertionError(f"未预期 JS: {js[:60]}")
+        if order is not None:
+            order.append(name)  # 先记账再取值: 抛异常的那次也要算进去
+        return pick(seq)
+
+    return fake
+
+
+class TestInputAssertion(unittest.TestCase):
+    """2026-11-19 输入机制加固: 打字前清空 + 规范化严格等价 + 限次重注入 + 不等价禁发。
+
+    旧实现的两个洞(审计报告 P0-②):
+    ① JS 里用 includes 复核 → 框内已有「续火花」时再插一次仍然命中, 发出去的是
+       「续火花续火花」;
+    ② 策略B 直接 keyboard.type 没有前置清空 → 策略A 部分成功后走兜底就打两份。
+    """
+
+    def setUp(self):
+        self.box = MagicMock()
+
+    def _send(self, page, text="续火花"):
+        with (
+            patch("src.sender.find", return_value=self.box),
+            patch("src.sender.try_send_button_or_enter", return_value="几何(1,2 SPAN)") as m,
+        ):
+            sent, method = send_message(page, text)
+        return sent, method, m
+
+    def test_strategy_b_clears_box_before_typing(self):
+        """兜底路径必须先清空再打字: 顺序是 click → clear → type。"""
+        order: list[str] = []
+        page = MagicMock()
+        page.evaluate.side_effect = _input_fake(
+            [{"ok": False, "reason": "no_box"}], ["续火花"], order=order
+        )
+        page.keyboard.type.side_effect = lambda *_a, **_k: order.append("type")
+        self.box.click.side_effect = lambda *_a, **_k: order.append("click")
+
+        sent, method, m = self._send(page)
+
+        self.assertTrue(sent, method)
+        self.assertIn("策略B", method)
+        self.assertLess(order.index("click"), order.index("clear"))
+        self.assertLess(order.index("clear"), order.index("type"))
+        m.assert_called_once()
+
+    def test_residual_old_text_blocks_send(self):
+        """框里残留旧文本(等价断言失败)时禁止发送, 且必须清掉脏草稿。"""
+        page = MagicMock()
+        page.evaluate.side_effect = _input_fake(
+            [{"ok": False, "reason": "content_mismatch", "got": "续火花续火花"}],
+            ["续火花续火花"],
+        )
+
+        sent, method, m = self._send(page)
+
+        self.assertFalse(sent)
+        self.assertIn("禁止发送", method)
+        m.assert_not_called()
+        # 限次: 策略A 2 次注入 + 策略B 2 次重打
+        self.assertEqual(page.keyboard.type.call_count, 2)
+        self.assertIn("execCommand('delete'", page.evaluate.call_args_list[-1][0][0])
+
+    def test_exception_after_partial_inject_does_not_reinject(self):
+        """策略A 部分成功后抛异常: 输入已就位 → 不再重注入(否则打出第二条)。"""
+        order: list[str] = []
+        page = MagicMock()
+        page.evaluate.side_effect = _input_fake(
+            [RuntimeError("Target closed")], ["续火花"], order=order
+        )
+
+        sent, method, m = self._send(page)
+
+        self.assertTrue(sent, method)
+        self.assertIn("策略A", method)
+        self.assertEqual(order.count("inject"), 1)
+        self.assertEqual(page.keyboard.type.call_count, 0)
+        m.assert_called_once()
+
+    def test_exception_with_other_draft_falls_to_cleared_strategy_b(self):
+        """异常时框里是别的草稿 → 交给策略B(先清空), 不能追加。"""
+        page = MagicMock()
+        page.evaluate.side_effect = _input_fake(
+            [RuntimeError("Target closed")], ["昨天的草稿", "续火花"]
+        )
+
+        sent, method, _m = self._send(page)
+
+        self.assertTrue(sent, method)
+        self.assertIn("策略B", method)
+        self.assertEqual(page.keyboard.type.call_count, 1)
+
+    def test_unreadable_box_keeps_legacy_send(self):
+        """读不到框内文本时沿用旧口径(不因读不到而禁发)。"""
+        page = MagicMock()
+        page.evaluate.side_effect = _input_fake(
+            [{"ok": False, "reason": "no_box"}], [None]
+        )
+
+        sent, method, _m = self._send(page)
+
+        self.assertTrue(sent, method)
+
+    def test_normalize_box_text(self):
+        """只归一「同一文本的不同写法」: 零宽字符/等宽空白/首尾空白。"""
+        for raw in (
+            "续火花",
+            "续火花\u200b",
+            "\u200b续\u200b火花",
+            "  续火花  ",
+        ):
+            self.assertEqual(normalize_box_text(raw), "续火花", repr(raw))
+        # 等宽空白(NBSP/全角空格)统一成普通空格, 但**不折叠、不删除**
+        self.assertEqual(normalize_box_text("续\u00a0火花"), "续 火花")
+        self.assertEqual(normalize_box_text("续\u3000火花"), "续 火花")
+        # 内部连续空白必须保留差异: 多打一个空格 ≠ 目标文本
+        self.assertEqual(normalize_box_text("续  火花"), "续  火花")
+        self.assertNotEqual(
+            normalize_box_text("续  火花"), normalize_box_text("续 火花")
+        )
+        self.assertEqual(normalize_box_text(None), "")
+
+    def test_js_uses_strict_equality_not_includes(self):
+        """防回归: JS 侧判据必须是规范化严格等价, 且不等价时在点按钮之前就返回。"""
+        self.assertIn("got !== want", _JS_INJECT_AND_SEND)
+        # 注释里保留 includes 的教训, 但代码里不许再出现 includes 判定
+        self.assertNotIn(".includes(", _JS_INJECT_AND_SEND)
+        gate = _JS_INJECT_AND_SEND.index("content_mismatch")
+        self.assertLess(gate, _JS_INJECT_AND_SEND.index("sendBtn"))
+        for js in (_JS_INJECT_AND_SEND, _JS_READ_BOX_TEXT):
+            self.assertIn("u200b", js)
+            # 等宽空白归一, 但不许再用 \s+ 折叠内部空白
+            self.assertIn("u00a0", js)
+            self.assertNotIn(r"\s+", js)
+        self.assertIn("execCommand('delete'", _JS_CLEAR_BOX)
+
+    def test_click_exception_after_inject_does_not_resend(self):
+        """文本已就位但点发送抛异常: 不落回策略B(那会再打一条), 直接报未确认。"""
+        page = MagicMock()
+        page.evaluate.side_effect = _input_fake(
+            [{"ok": True, "btnClicked": False, "want": "续火花", "got": "续火花"}],
+            ["续火花"],
+        )
+        with (
+            patch("src.sender.find", return_value=self.box),
+            patch(
+                "src.sender.try_send_button_or_enter", side_effect=RuntimeError("boom")
+            ),
+        ):
+            sent, method = send_message(page, "续火花")
+
+        self.assertFalse(sent)
+        self.assertIn("发送点击异常", method)
+        self.assertEqual(page.keyboard.type.call_count, 0)
+
+    def test_internal_double_space_blocks_send(self):
+        """内部多一个空格 = 真实输入差异 → 禁发, 不允许被规范化吞掉。"""
+        page = MagicMock()
+        page.evaluate.side_effect = _input_fake(
+            [{"ok": True, "got": "续  火花"}], ["续  火花"]
+        )
+
+        sent, method, m = self._send(page, "续 火花")
+
+        self.assertFalse(sent)
+        self.assertIn("禁止发送", method)
+        m.assert_not_called()
+
+    def test_nbsp_is_equivalent_and_sends(self):
+        """NBSP 与普通空格是同一文本的不同写法 → 放行, 不误禁发。"""
+        page = MagicMock()
+        page.evaluate.side_effect = _input_fake(
+            [{"ok": True, "btnClicked": True, "got": "续\u00a0火花"}],
+            ["续\u00a0火花"],
+        )
+
+        sent, method, _m = self._send(page, "续 火花")
+
+        self.assertTrue(sent, method)
+        self.assertIn("策略A", method)

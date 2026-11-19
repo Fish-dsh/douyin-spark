@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+
 from playwright.sync_api import Page
 
 from logutil import log
@@ -102,6 +104,122 @@ _JS_BOX_EMPTY = """
   return cleaned === '';
 }
 """
+
+_INJECT_ATTEMPTS = 2
+
+# 规范化口径(与 _JS_INJECT_AND_SEND / _JS_CLEAR_BOX / _JS_READ_BOX_TEXT 里的 norm() 逐条一致)。
+# 只归一「同一段文本的不同写法」, 不改动内容本身:
+#   ① 去零宽字符(U+200B..U+200F / U+FEFF): 编辑器和输入法自己塞的不可见字符;
+#   ② 等宽空白(NBSP/全角空格/各种 thin space)统一成普通空格。
+# **内部空白不折叠**: 「你好 世界」和「你好  世界」必须判不等价 —— 多打一个空格是真实
+# 输入缺陷, 折叠掉就等于把它当等价文本放行(这正是本次要堵的洞)。首尾空白允许裁掉,
+# 因为注入时编辑器会加前导换行。
+_BOX_NOISE_RE = re.compile("[\u200b\u200c\u200d\ufeff\u200e\u200f]")
+_BOX_WIDE_RE = re.compile(r"[\u00a0\u1680\u2000-\u200a\u202f\u205f\u3000]")
+
+
+def normalize_box_text(s) -> str:
+    """归一化到可比较形态: 去零宽字符 → 等宽空白统一成空格 → 去首尾空白。
+
+    刻意不折叠内部连续空白(见上方注释): 折叠会让多空格通过校验。
+    """
+    if s is None:
+        return ""
+    if not isinstance(s, str):
+        s = str(s)
+    return _BOX_WIDE_RE.sub(" ", _BOX_NOISE_RE.sub("", s)).strip()
+
+
+# 2026-11-19 输入机制加固: 策略B 打字前必须先把框清干净。
+# 旧实现只在策略A 抛异常时才走到策略B, 而那一刻框里可能已经躺着策略A 注入的文本
+# (注入成功、点按钮时异常), 直接 keyboard.type 会追加成「续火花续火花」。
+_JS_CLEAR_BOX = r"""
+() => {
+  const box = document.querySelector('[contenteditable="true"]')
+    || document.querySelector('textarea')
+    || [...document.querySelectorAll('div')].find(e => e.isContentEditable);
+  if (!box) return {ok: false, reason: 'no_box'};
+  const norm = (s) => String(s == null ? '' : s)
+    .replace(/[\u200b\u200c\u200d\ufeff\u200e\u200f]/g, '')
+    .replace(/[\u00a0\u1680\u2000-\u200a\u202f\u205f\u3000]/g, ' ')
+    .trim();
+  const read = () => norm(box.value !== undefined ? box.value : (box.innerText || box.textContent || ''));
+  try { box.focus(); box.click(); } catch (e) {}
+  // 1) 走编辑器自己的删除命令: 富文本(Draft/Slate 类)只有这条能同步内部 state
+  try {
+    const sel = window.getSelection();
+    const range = document.createRange();
+    range.selectNodeContents(box);
+    sel.removeAllRanges();
+    sel.addRange(range);
+    document.execCommand('delete', false);
+  } catch (e) {}
+  const afterSelect = read();
+  if (!afterSelect) return {ok: true, cleared: true, mode: 'select_delete'};
+  // 2) 兜底: 清 DOM 再补事件(随后的 keyboard.type 是真实按键, 编辑器会自己接管)
+  box.textContent = '';
+  box.dispatchEvent(new Event('input', {bubbles: true}));
+  box.dispatchEvent(new Event('change', {bubbles: true}));
+  const left = read();
+  return {ok: !left, cleared: !left, mode: 'textcontent_reset', left: left.slice(0, 40)};
+}
+"""
+
+# 读回输入框当前文本(规范化后); 定位不到返回 null, 由调用方按「读不到」降级处理。
+_JS_READ_BOX_TEXT = r"""
+() => {
+  const box = document.querySelector('[contenteditable="true"]')
+    || document.querySelector('textarea')
+    || [...document.querySelectorAll('div')].find(e => e.isContentEditable);
+  if (!box) return null;
+  const raw = box.value !== undefined ? (box.value || '') : (box.innerText || box.textContent || '');
+  return String(raw).replace(/[\u200b\u200c\u200d\ufeff\u200e\u200f]/g, '').replace(/[\u00a0\u1680\u2000-\u200a\u202f\u205f\u3000]/g, ' ').trim();
+}
+"""
+
+
+def _read_box_text(page) -> str | None:
+    """读回输入框文本(已规范化); 读不到返回 None(不把「读不到」当成「空的」)。"""
+    try:
+        v = page.evaluate(_JS_READ_BOX_TEXT)
+    except Exception:
+        return None
+    return v if isinstance(v, str) else None
+
+
+def _inject_verified(page, text: str) -> tuple:
+    """注入并按「规范化后严格等价」校验; 返回 (状态, 最后一次结果, 注入次数)。
+
+    状态:
+      ok        = 文本已就位且与目标等价(可以发送)
+      mismatch  = 限次重注入后仍不等价 → **禁止发送**
+      exception = JS 抛异常, 注入可能已部分生效 → 调用方须先读回, 不许盲目重注入
+      failed    = 注入动作没做成(定位不到输入框/编辑器拒绝等), 等价性未知
+
+    为什么不等价时先重注入而不是直接放弃: 重注入是「全选 + insertText」, 天然覆盖
+    旧文本, 因此不会叠字; 但次数必须有上限, 免得在坏掉的编辑器上空转整晚。
+    """
+    want = normalize_box_text(text)
+    last: dict = {}
+    for i in range(_INJECT_ATTEMPTS):
+        try:
+            result = page.evaluate(_JS_INJECT_AND_SEND, {"text": text})
+        except Exception as exc:
+            return "exception", {"reason": type(exc).__name__}, i + 1
+        if not hasattr(result, "get"):
+            result = {}
+        if result.get("ok"):
+            got = result.get("got")
+            # JS 已自校过一次; 这里用 Python 侧同一规则复核, 两处规则漂移时以严格者为准。
+            if isinstance(got, str) and normalize_box_text(got) != want:
+                result = {"ok": False, "reason": "content_mismatch", "got": got}
+            else:
+                return "ok", result, i + 1
+        last = result
+        if result.get("reason") != "content_mismatch":
+            return "failed", result, i + 1
+        log(f"[发送] 输入内容与目标不等价(第 {i + 1} 次注入): 期望 {want!r}, 实际 {result.get('got')!r}")
+    return "mismatch", last, _INJECT_ATTEMPTS
 
 # 2026-10-07 审计修正: 原 _JS_LAST_MSG 只回「最后一条文本」, 于是 confirm_send 无法
 # 区分「刚发出去的那条」与「昨晚残留的同一条」(固定文案 续火花 天天相同, 必然残留)。
@@ -213,15 +331,27 @@ def read_tail(page: Page) -> tuple:
         return None, "", ""
 
 
-_JS_INJECT_AND_SEND = """
+_JS_INJECT_AND_SEND = r"""
 ({text}) => {
   const box = document.querySelector('[contenteditable="true"]')
     || document.querySelector('textarea')
     || [...document.querySelectorAll('div')].find(e => e.isContentEditable);
-  if (!box) return {ok: false, reason: 'no_box'};
+  if (!box) return {ok: false, reason: 'no_box', want: '', got: ''};
+  // 2026-11-19 输入机制加固: 判据从 includes 改成「规范化后严格等价」。
+  // includes 的洞: 框里若已有旧文本(上一晚的「续火花」/上一策略的残留),
+  // 「旧文本 + 新文本」同样 includes(text) → 校验通过 → 把重复内容发出去。
+  // 规范化规则必须与 Python 侧 normalize_box_text() 逐条一致:
+  // 去零宽字符(u200b/u200c/u200d/ufeff/u200e/u200f) + 等宽空白(NBSP/全角/tinyspace)
+  // 统一成普通空格 + 去首尾空白。**内部空白不折叠**: 「你好 世界」≠「你好  世界」。
+  const norm = (s) => String(s == null ? '' : s)
+    .replace(/[\u200b\u200c\u200d\ufeff\u200e\u200f]/g, '')
+    .replace(/[\u00a0\u1680\u2000-\u200a\u202f\u205f\u3000]/g, ' ')
+    .trim();
+  const want = norm(text);
+  const read = () => norm(box.value !== undefined ? box.value : (box.innerText || box.textContent || ''));
   box.focus();
   try { box.click(); } catch (e) {}
-  // 全选清空
+  // 全选清空(限次重注入时, 这一步天然覆盖旧文本, 所以重注入不会叠字)
   const sel = window.getSelection();
   const range = document.createRange();
   range.selectNodeContents(box);
@@ -230,7 +360,7 @@ _JS_INJECT_AND_SEND = """
   // 插入文字
   let inserted = false;
   try { inserted = document.execCommand('insertText', false, text); } catch (e) { inserted = false; }
-  if (!inserted || !(box.textContent || '').includes(text)) {
+  if (!inserted || read() !== want) {
     box.textContent = text;
   }
   // 2026-11-01 板端实测: 注入后输入框里会多出一个前导换行, 发出去气泡开头空一行
@@ -264,13 +394,19 @@ _JS_INJECT_AND_SEND = """
   trimEdge();
   // 清空首尾空行后必须复核: 正文还在才继续, 否则退回直接写 textContent
   // (宁可气泡难看, 也不能把要发的字弄丢)。
-  if (!(box.innerText || '').replace(/\u200b/g, '').includes(text)) {
+  if (read() !== want) {
     box.textContent = text;
   }
   // 触发 input 事件(抖音依赖此事件更新内部状态)
   box.dispatchEvent(new Event('input', { bubbles: true }));
   box.dispatchEvent(new Event('change', { bubbles: true }));
   box.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: text }));
+  // 发送前的最后一道闸: 内容不等价 → 一个字节都不许发, 直接上报 mismatch,
+  // 由 Python 侧决定「限次重注入」还是「整体禁止发送」。
+  const got = read();
+  if (got !== want) {
+    return {ok: false, reason: 'content_mismatch', want: want, got: got.slice(0, 40)};
+  }
   // 查找并点击发送按钮(比 keyboard.press('Enter') 更可靠)
   const sendBtn = Array.from(document.querySelectorAll('button, span, div, svg'))
     .find(e => {
@@ -282,7 +418,7 @@ _JS_INJECT_AND_SEND = """
     try { sendBtn.click(); btnClicked = true; }
     catch(e) {}
   }
-  return { ok: true, btnClicked };
+  return { ok: true, btnClicked: btnClicked, want: want, got: got };
 }
 """
 
@@ -436,52 +572,100 @@ def send_message(
         )
         return False, "未定位到输入框"
 
+    want = normalize_box_text(text)
+
     # 策略A: JS 注入 + 发送按钮点击 (最可靠)
-    try:
-        result = page.evaluate(_JS_INJECT_AND_SEND, {"text": text})
-        events.emit(
-            "input",
-            "inject",
-            "ok" if result.get("ok") else "failed",
-            friend=friend,
-            account=account,
-            attempt=aid,
-            verified=None,
-            extra={
-                "btn_clicked": bool(result.get("btnClicked")),
-                "reason": result.get("reason"),
-            },
-        )
-        if result.get("ok"):
-            if result.get("btnClicked"):
-                log("[发送] 策略A 生效: JS注入+发送按钮点击")
-                return True, "策略A 生效: JS注入+发送按钮点击"
-            log("[发送] 策略A 生效: JS注入+文本(input事件已触发)")
-            # JS 找不到含「发送」文案的按钮是常态(纯图标), 走命中校验的几何点击
+    # 2026-11-19 输入机制加固: 注入后按「规范化 + 严格等价」校验(JS 内自校 + Python 复核),
+    # 不等价只允许**限次重注入**(重注入是全选后重插, 天然覆盖旧文本, 不会叠字),
+    # 用尽仍不等价就交给策略B(它先清空再打); 两路都没通过校验 = 一律不许发送。
+    state, result, tries = _inject_verified(page, text)
+    events.emit(
+        "input",
+        "inject",
+        "ok" if state == "ok" else "failed",
+        friend=friend,
+        account=account,
+        attempt=aid,
+        verified=None,
+        error_class=(
+            None if state == "ok"
+            else ("content_mismatch" if state == "mismatch" else str(result.get("reason") or state))
+        ),
+        extra={
+            "btn_clicked": bool(result.get("btnClicked")),
+            "reason": result.get("reason"),
+            "attempts": tries,
+            "want": want[:40],
+            "got": str(result.get("got") or "")[:40],
+        },
+    )
+    if state == "ok":
+        if result.get("btnClicked"):
+            log("[发送] 策略A 生效: JS注入+发送按钮点击")
+            return True, "策略A 生效: JS注入+发送按钮点击"
+        log("[发送] 策略A 生效: JS注入+文本(input事件已触发)")
+        # JS 找不到含「发送」文案的按钮是常态(纯图标), 走命中校验的几何点击
+        try:
             act = try_send_button_or_enter(page, attempt=aid, friend=friend)
+        except Exception as exc:
+            # 文本已就位但点发送那步炸了: 不许落回策略B(那会再打一条), 报未确认即可,
+            # 由上层确认/重试链路决定, 保持 send_message 不向上抛异常的既有约定。
+            log(f"[发送] 策略A 文本已就位但发送点击异常: {exc}")
+            return False, f"策略A 输入已就位但发送点击异常({type(exc).__name__})"
+        return True, f"策略A 生效: JS注入+{act}"
+    if state == "exception":
+        # 部分成功: 注入可能真的写进去了, 只是点按钮那步抛了异常。此时盲目重注入
+        # 会打出第二条消息 → 先读回, 内容已等价就直接走一次发送点击。
+        got = _read_box_text(page)
+        if got is not None and normalize_box_text(got) == want:
+            log("[发送] 策略A 异常但输入已就位, 不重注入, 直接走发送点击")
+            try:
+                act = try_send_button_or_enter(page, attempt=aid, friend=friend)
+            except Exception as exc2:
+                log(f"[发送] 策略A 输入已就位但发送点击异常: {exc2}")
+                return False, f"策略A 输入已就位但发送点击异常({type(exc2).__name__})"
             return True, f"策略A 生效: JS注入+{act}"
-        else:
-            log(f"[发送] 策略A JS注入失败: {result.get('reason', 'unknown')}")
-    except Exception as exc:
-        log(f"[发送] 策略A JS注入异常: {exc}")
+        log(f"[发送] 策略A JS注入异常: {result.get('reason')}")
+    else:
+        log(f"[发送] 策略A 未通过输入校验: {result.get('reason', 'unknown')}")
+
+    # 策略B: 点击输入框 + 可靠清空 + keyboard.type (兜底)
+    # 2026-11-19 加固: 打字前先清空(A 失败时框里可能已有残留), 打完按同一规则校验;
+    # 不等价则清空重打, 用尽仍不等价 → 清掉脏草稿并**禁止发送**(草稿留着会被下次点发送)。
+    try:
+        page.wait_for_timeout(perf.ms("type_settle_ms"))
+        for i in range(_INJECT_ATTEMPTS):
+            box.click(timeout=perf.ms("input_click_ms"))
+            page.evaluate(_JS_CLEAR_BOX)
+            page.wait_for_timeout(perf.ms("type_settle_ms"))
+            if i == 0:
+                log("[发送] 策略B: 已点击输入框并清空, 开始键盘输入")
+            page.keyboard.type(text, delay=30)
+            got = _read_box_text(page)
+            if got is None:
+                # 读不到输入框内容 → 沿用旧口径(不因读不到而禁发), 交给发送点击
+                act = try_send_button_or_enter(page, attempt=aid, friend=friend)
+                return True, f"策略B 生效: click + keyboard.type + {act}"
+            if normalize_box_text(got) == want:
+                act = try_send_button_or_enter(page, attempt=aid, friend=friend)
+                return True, f"策略B 生效: click + keyboard.type + {act}"
+            log(f"[发送] 策略B 输入不等价(第 {i + 1} 次): 期望 {want!r}, 实际 {got[:40]!r}, 清空重打")
+        try:
+            page.evaluate(_JS_CLEAR_BOX)
+        except Exception:
+            pass
         events.emit(
             "input",
-            "inject",
+            "type",
             "failed",
             friend=friend,
             account=account,
             attempt=aid,
-            error_class=type(exc).__name__,
+            verified=None,
+            error_class="content_mismatch",
+            extra={"attempts": _INJECT_ATTEMPTS, "want": want[:40]},
         )
-
-    # 策略B: 点击输入框 + keyboard.type (兜底)
-    try:
-        box.click(timeout=perf.ms("input_click_ms"))
-        page.wait_for_timeout(perf.ms("type_settle_ms"))
-        log("[发送] 策略B: 已点击输入框, 开始键盘输入")
-        page.keyboard.type(text, delay=30)
-        act = try_send_button_or_enter(page, attempt=aid, friend=friend)
-        return True, f"策略B 生效: click + keyboard.type + {act}"
+        return False, "策略B 输入内容与目标不等价(已禁止发送)"
     except Exception as exc:
         log(f"[发送] 策略B 失败: {exc}")
         events.emit(
