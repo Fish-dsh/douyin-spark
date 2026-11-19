@@ -84,7 +84,11 @@ _PROMPT = (
 _JS_REDACT = """
 () => {
   const vw = window.innerWidth, vh = window.innerHeight;
-  const limitX = vw * 0.45;           // 只脱敏左侧会话栏, 不动右侧消息区
+  // 2026-11-19 修正: 原先只脱敏左侧 45%(limitX = vw * 0.45), 右侧已打开的会话
+  // 内容会明文外发 —— 点击好友前/定位失败时右侧往往正挂着上一个会话的记录。
+  // 现在覆盖整个视口: 所有文本 + 所有非火花头像图片一律打码, 只保留火花图标
+  // (行定位必需)。行定位只看左栏版式, 多打码不影响候选点质量。
+  const limitX = vw;
   const boxes = [];
   const walker = document.createTreeWalker(
     document.body, NodeFilter.SHOW_TEXT, null

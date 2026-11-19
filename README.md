@@ -97,7 +97,7 @@ README 只放主干，细节都在 `docs/`：
 | 人 | [docs/configuration.md](docs/configuration.md) | 全部配置字段、环境变量、登录凭据从哪里读 |
 | 人 | [docs/deployment.md](docs/deployment.md) | 部署到 Linux 机器、cron、低配机内存优化 |
 | 人 | [docs/operations.md](docs/operations.md) | 退出码、每日巡检、登录管理、时区与 FAQ |
-| 人 | [docs/self-heal.md](docs/self-heal.md) | 自愈机制：错误分类、恢复策略表、告警 |
+| 人 | [docs/self-heal.md](docs/self-heal.md) | 自愈机制：错误分类、恢复策略表、告警（含与视觉兜底的区别） |
 | 人 | [docs/development.md](docs/development.md) | 跑测试、lint、本地开发、提 PR 前自检 |
 | Agent | [AGENTS.md](AGENTS.md) | 仓库地图、命令清单、改动约定（给 AI/自动化代理看的） |
 | 人 | [docs/notes/](docs/notes/README.md) | **实测笔记**：为什么这个项目必须有头跑 —— headless 在 ARM 小板上的完整失败实测（含原始参数与截图数据） |
