@@ -21,15 +21,7 @@ import time
 
 from logutil import log
 
-try:
-    from . import perf
-except ImportError:  # 以顶层模块方式加载时(src/ 在 sys.path 上)
-    import perf  # type: ignore[no-redef]
-
-try:
-    from . import vision
-except ImportError:  # 以顶层模块方式加载时(src/ 在 sys.path 上)
-    import vision  # type: ignore[no-redef]
+from . import perf, vision
 
 
 class SparkDiscoveryError(Exception):

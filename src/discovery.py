@@ -6,15 +6,11 @@ from playwright.sync_api import Page
 
 from logutil import log
 
+from . import perf
 from .config import CHAT_URL
 from .debug import dump_page
 from .finder import page_render_state
 from .self_heal import self_heal
-
-try:
-    from . import perf
-except ImportError:  # 以顶层模块方式加载时(src/ 在 sys.path 上)
-    import perf  # type: ignore[no-redef]
 from .spark_status import (
     SparkDiscoveryError,
     discover_friends_with_spark,

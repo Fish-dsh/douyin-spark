@@ -31,10 +31,7 @@ from pathlib import Path
 
 from logutil import log
 
-try:
-    from . import recovery
-except ImportError:  # 以顶层模块方式加载时(src/ 在 sys.path 上)
-    import recovery  # type: ignore[no-redef]
+from . import recovery
 
 _PROJECT_DIR = Path(__file__).resolve().parent.parent
 # 告警去重账本: 同一错误签名每自然日最多告警 1 次 —— 告警疲劳是无人值守的大忌,
@@ -133,10 +130,7 @@ def _alert(error_type: str, error_msg: str, category: str, extra: str) -> None:
         "src/spark_status.py, 修好后 `python spark.py --force` 补跑"
     )
     try:
-        try:
-            from .health_check import notify
-        except ImportError:  # 以顶层模块方式加载 self_heal 时
-            from health_check import notify  # type: ignore[no-redef]
+        from .health_check import notify
 
         notify(msg)
     except Exception as exc:

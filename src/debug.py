@@ -8,12 +8,8 @@ from playwright.sync_api import Page
 
 from logutil import log
 
+from . import perf
 from .config import BASE_DIR
-
-try:
-    from . import perf
-except ImportError:  # 以顶层模块方式加载时(src/ 在 sys.path 上)
-    import perf  # type: ignore[no-redef]
 
 SCREENSHOT_DIR = BASE_DIR / "runtime" / "heal_screenshots"
 

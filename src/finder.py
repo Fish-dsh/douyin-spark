@@ -6,12 +6,8 @@ from playwright.sync_api import Page
 
 from logutil import log
 
+from . import perf
 from .debug import dump_page
-
-try:
-    from . import perf
-except ImportError:  # 以顶层模块方式加载时(src/ 在 sys.path 上)
-    import perf  # type: ignore[no-redef]
 
 # 性能(2026-11-01): 判断「已经在聊天页且列表有内容」, 用于跳过一次整页重载。
 _JS_CHAT_READY = """() => {

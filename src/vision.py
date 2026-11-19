@@ -83,12 +83,8 @@ from pathlib import Path
 
 from logutil import log
 
-try:
-    from . import perf
-    from .config import BASE_DIR
-except ImportError:  # 以顶层模块方式加载时(src/ 在 sys.path 上)
-    import perf  # type: ignore[no-redef]
-    from config import BASE_DIR  # type: ignore[no-redef]
+from . import perf
+from .config import BASE_DIR
 
 # 视觉截图与原始页面截图分开放: 前者已脱敏, 便于事后复盘
 _SHOT_DIR = BASE_DIR / "runtime" / "vision_shots"
