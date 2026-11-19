@@ -6,7 +6,7 @@
 
 > **免责声明**：本项目为个人自动化实践，与抖音官方无关。自动化操作可能触发平台风控，请自行评估风险并遵守平台协议；由此产生的任何后果由使用者自负。
 
-`Python 3.11+` · `Playwright (Chromium)` · `MIT` · `527 单元测试`
+`Python 3.9+` · `Playwright (Chromium)` · `MIT` · `530 单元测试` · `CI 覆盖 3.9/3.11/3.12`
 
 ---
 
@@ -22,11 +22,13 @@
 ## 快速开始（Linux）
 
 ```bash
-git clone <this-repo> douyin-spark && cd douyin-spark
+git clone https://github.com/Fish-dsh/douyin-spark.git
+cd douyin-spark
 
 python3 -m venv .venv
 .venv/bin/pip install -r requirements.txt
 .venv/bin/playwright install chromium          # 首次需要下载浏览器
+# 若报缺系统库: sudo .venv/bin/playwright install-deps chromium
 
 cp config.example.json config.json             # 好友名单无需配置，扫描自动发现
 
@@ -49,7 +51,7 @@ cp config.example.json config.json             # 好友名单无需配置，扫�
 | 登录态失效后重新登录 | `.venv/bin/python login.py --manual` |
 | 今晚到底成没成 | `.venv/bin/python -m src.health_check` |
 | 这周有人断了吗 | `.venv/bin/python -m src.weekly_report` |
-| 本地开发（不碰正式账本） | `./run_dev.sh --dry-run` |
+| 本地开发（不碰正式账本） | `./run_dev.sh --dry-run`（自动补 `config.json` 占位） |
 
 ## 配置速查
 
@@ -71,11 +73,14 @@ cp config.example.json config.json             # 好友名单无需配置，扫�
 ```bash
 sudo rsync -a --exclude runtime --exclude .venv ./ /opt/douyin-spark/   # 1. 放代码（路径可在 run_cron.sh 改）
 cd /opt/douyin-spark && python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
-.venv/bin/playwright install --with-deps chromium                       # 2. 装依赖
+.venv/bin/playwright install --with-deps chromium                       # 2. 装依赖（--with-deps 需 sudo）
 sudo apt install -y xvfb                                                 # 3. Xvfb 常驻 :99
-# 4. crontab：
-#   0 0 * * *  cd /opt/douyin-spark && ./run_cron.sh
-#  45 1 * * *  cd /opt/douyin-spark && .venv/bin/python -m src.health_check
+sudo cp deploy/xvfb.service /etc/systemd/system/
+sudo systemctl enable --now xvfb                                         #    开机自启并立刻拉起，systemctl status xvfb 应 active
+# 4. crontab（-e）：
+#   0 0 * * *  /opt/douyin-spark/run_cron.sh
+#  45 1 * * *  /opt/douyin-spark/.venv/bin/python /opt/douyin-spark/src/health_check.py --quiet --notify-only-on-change
+# 注意：cron 不读 PATH，命令一律写绝对路径；run_cron.sh 必须 chmod +x。
 ```
 
 细节（同步方式、低配机内存优化、Python 版本对齐）见 [部署文档](docs/deployment.md)。

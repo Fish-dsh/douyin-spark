@@ -66,7 +66,7 @@
 cron 建议（部署机，晚于 00:00 主任务）：
 
 ```cron
-15 1 * * * /opt/douyin-spark/.venv/bin/python /opt/douyin-spark/src/health_check.py --quiet --notify-only-on-change
+45 1 * * * /opt/douyin-spark/.venv/bin/python /opt/douyin-spark/src/health_check.py --quiet --notify-only-on-change
 ```
 
 `--notify-only-on-change` 用 `runtime/.health_failed` 标记避免连续失败刷屏；恢复健康自动清除。**注意**：本脚本刻意不写 `spark.log`，避免自身的日志满足日志检查（自证循环）。
@@ -100,7 +100,7 @@ cron 建议（部署机，晚于 00:00 主任务）：
 
 ## 开发与自检
 
-- **代码不写死好友昵称/手机号等隐私**，凭据只放 `.env`（chmod 600）与 `config.json`。
+- **代码不写死好友昵称/手机号等隐私**。无人值守路径的凭据只放 `config.json` 的 `accounts`（chmod 600）；`.env` 仅服务人工入口 `login.py --password`，主链路不读它。
 - **发送内容固定**"续火花"，表情优先、文字兜底。发送确认按三级判据：列表新增气泡（硬证据）> 面板关闭但证据读不到（降级，日志标注）> 证据可读且零新增（判未发送，走文字兜底）。
 - 某个设计为什么这么定，读对应模块文件头的注释。
 - 跑测试、lint、提交前自检见 [development.md](development.md)。

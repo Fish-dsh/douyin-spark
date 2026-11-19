@@ -13,9 +13,10 @@
 读出并核对**。坐标偏一行会让取证落到相邻的真实行上, 而该行若无火花图标即被丢弃,
 不会「点错好友发错人」——这在结构上杜绝了错发的可能。
 
-**脱敏**(用户要求「裁剪+打码后发」): 外发前用 DOM 注入黑色遮罩盖住左栏**全部文本**
-(昵称/消息预览/时间)与**头像 img**(人脸), 只保留火花图标(判定需要, 且按 src
-关键词保留, 与类名无关)。昵称不来自模型 —— 它由本地 DOM 回填, 故打码不影响功能。
+**脱敏**(用户要求「裁剪+打码后发」): 外发前用 DOM 注入黑色遮罩盖住**整个视口**的
+全部文本(昵称/消息预览/时间/右侧已打开的会话记录)与**头像 img**(人脸), 只保留
+火花图标(判定需要, 且按 src 关键词保留, 与类名无关)。最初只盖左栏 45%, 右侧会话
+记录会明文外发(2026-11-19 修正)。昵称不来自模型 —— 它由本地 DOM 回填, 故打码不影响功能。
 
 **可用性**: 主用 AGNES(`agnes-2.5-flash`, 实测不限流、约 1.5s, 但坐标偏一行);
 备用 GLM(`glm-4.6v-flash`, 坐标准但免费档常限流)。都失败/未配置 → 返回空表,
@@ -70,7 +71,23 @@ _PROVIDERS: dict[str, dict] = {
         "env": "ZHIPU_API_KEY",
     },
 }
-_PI_AUTH_FILE = Path.home() / ".pi" / "agent" / "auth.json"
+# 凭据来源(按优先级): 环境变量 AGNES_API_KEY / ZHIPU_API_KEY > 本文件。
+# 默认值指向某台开发机上私有 CLI 的登录缓存, 对陌生人是无意义的路径;
+# 用自己的凭据文件就设 SPARK_VISION_AUTH_FILE=/path/to/auth.json(或 config.json
+# 的 vision_auth_file), 格式 {"agnes": {"key": "..."}, "glm": {"key": "..."}}。
+# 都拿不到 key 时本模块自动空转, 主链路不受影响。
+_DEFAULT_AUTH_FILE = Path.home() / ".pi" / "agent" / "auth.json"
+
+
+def _auth_file() -> Path:
+    """凭据文件路径: env SPARK_VISION_AUTH_FILE > config.vision_auth_file > 默认。"""
+    env = os.environ.get("SPARK_VISION_AUTH_FILE", "").strip()
+    if env:
+        return Path(env).expanduser()
+    cfg_path = str(_config().get("vision_auth_file") or "").strip()
+    if cfg_path:
+        return Path(cfg_path).expanduser()
+    return _DEFAULT_AUTH_FILE
 
 _PROMPT = (
     "这是抖音网页版聊天页截图, 左侧是会话列表。图中敏感文字与头像已被黑色遮罩盖住, "
@@ -233,7 +250,7 @@ def _api_key(provider: str) -> str:
     if env_key:
         return env_key
     try:
-        data = json.loads(_PI_AUTH_FILE.read_text(encoding="utf-8"))
+        data = json.loads(_auth_file().read_text(encoding="utf-8"))
         return str((data.get(provider) or {}).get("key") or "").strip()
     except Exception:
         return ""
@@ -416,8 +433,8 @@ def locate_rows(page) -> list[dict]:
             return []
         if not _provider_chain():
             log(
-                "[vision] 未配置视觉模型 key(AGNES_API_KEY/ZHIPU_API_KEY 或 "
-                "~/.pi/agent/auth.json), 跳过"
+                "[vision] 未配置视觉模型 key(AGNES_API_KEY/ZHIPU_API_KEY, 或 "
+                "SPARK_VISION_AUTH_FILE/config.vision_auth_file 指向的凭据文件), 跳过"
             )
             return []
         shot = _redacted_screenshot(page)

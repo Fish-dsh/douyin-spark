@@ -101,6 +101,20 @@ def load_config() -> dict:
     cfg["perf_profile"] = profile
     # 档位在此一次性落到 perf 模块, 之后全流程的等待/超时都读它(不再各处写死)。
     perf.set_profile(profile)
+    # 有头模式是硬约束(AGENTS.md): 抖音对 headless chromium 会弹拦截页, 弱机
+    # 无头还会渲染挂死(2026-09-30 事故: 板子 config.json 丢这两个键, 当晚全 skip)。
+    # 这里把缺失项显式补成 false —— 不再依赖 session.launch_browser 的默认值,
+    # 否则「没写这一项」就等于悄悄跑 headless, 正是那次事故的成因。
+    if "headless" not in cfg:
+        log("警告: config.json 缺少 headless, 已按有头模式硬约束补为 false")
+        cfg["headless"] = False
+    if cfg.get("headless") is not False:
+        log(
+            "警告: headless 不为 false。headless 会被抖音拦截页挡住、弱机还会渲染挂死,"
+            " 只适合桌面档临时调试; 无人值守必须 headless=false 且 display=\":99\""
+        )
+    elif not cfg.get("display"):
+        log("警告: headless=false 但没有 display, 有头模式下将没有 X 显示可用")
     if "accounts" not in cfg:
         log("警告: config.json 缺少 accounts 字段，使用空列表")
         cfg["accounts"] = []

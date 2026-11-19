@@ -346,13 +346,15 @@ class TestLaunchArgs(unittest.TestCase):
 class TestLaunchBrowser(unittest.TestCase):
     """headless/display 走 cfg 驱动(板子 Xvfb headed 模式, 2026-09-24)。"""
 
-    def test_default_headless_true(self):
+    def test_default_headless_false(self):
+        """未写 headless 时必须默认有头(硬约束: headless 会被抖音拦截并渲染挂死)。"""
         p = MagicMock()
         with patch("src.session.memory_report"):
             launch_browser(p, {})
         _, kwargs = p.chromium.launch.call_args
-        self.assertTrue(kwargs["headless"])
-        self.assertIs(kwargs["args"], LAUNCH_ARGS)
+        self.assertFalse(kwargs["headless"])
+        # 有头路径会去掉禁用软件光栅器并补 SwiftShader(虚拟显示必需)
+        self.assertNotIn("--disable-software-rasterizer", kwargs["args"])
 
     def test_cfg_headed_with_display(self):
         import os

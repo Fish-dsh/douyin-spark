@@ -8,7 +8,13 @@ python3 -m venv .venv
 .venv/bin/playwright install chromium
 ```
 
-`requirements.txt` 里的版本是锁定的（playwright / ruff / opencv-python-headless）。`requirements.txt` 只放运行与测试必需的东西。
+`requirements.txt` 里版本全部锁死，分两类：
+
+- **运行时必需**：`playwright`（浏览器自动化）。
+- **可选**：`opencv-python-headless`——只有视觉兜底的 CV 粗定位层（`src/vision_cv.py`）用；没装时 `cv2` 为 `None`，该层自动放弃，主链路不受影响。
+- **开发用**：`ruff`（lint），跑 `ruff check .` 才需要。
+
+所以「`pip install -r requirements.txt` 装全」= 开发环境；弱机只跑生产可以省掉 ruff 甚至 opencv。
 
 ## 跑测试
 
@@ -21,7 +27,9 @@ python3 -m venv .venv
 
 ## 本地开发入口
 
-`./run_dev.sh --dry-run` 读 `config.dev.json`，把日志、登录态、账本全落到 `runtime-dev/`，不碰正式 `runtime/`。
+`./run_dev.sh --dry-run` 读 `config.dev.json`（`extends: config.json` + `perf_profile: high` + `headless: false` + `display: null`），把日志、登录态、账本全落到 `runtime-dev/`，不碰正式 `runtime/`。
+
+全新 clone 直接跑也行：脚本先查 `.venv/bin/python`，缺了就打印装环境的命令并退出；`config.json` 被 `.gitignore` 排除、clone 里没有，脚本会按 `config.example.json` 补一份 `chmod 600` 的占位配置并提示去改 `accounts` / `send_window`、用 `login.py --manual` 生成登录态。
 
 ## 调试
 

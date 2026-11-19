@@ -130,8 +130,46 @@ def _check_clock_sanity() -> None:
 _PID_STALE_SEC = 3 * 3600  # PID 文件超过该年龄一律视为陈旧锁(兜住 PID 复用/无权限读取)
 
 
+def _pid_alive(pid: int) -> bool:
+    """该 PID 是否仍存活。
+
+    **不要在 Windows 上照抄 POSIX 的 `os.kill(pid, 0)`**: 那边 sig=0 就是
+    signal.CTRL_C_EVENT(值 0), 于是这次「探测」会把 Ctrl+C 广播进控制台进程组 ——
+    实测能把正在跑单测的控制台整段打断(subprocess.communicate 处抛
+    KeyboardInterrupt), 看起来像「跑测试卡死」。改用 OpenProcess 拿句柄判断。
+    """
+    if pid <= 0:
+        return False
+    if os.name == "nt":
+        import ctypes
+
+        process_query_limited_information = 0x1000
+        still_active = 259
+        kernel32 = ctypes.windll.kernel32
+        handle = kernel32.OpenProcess(
+            process_query_limited_information, False, pid
+        )
+        if not handle:
+            return False
+        try:
+            code = ctypes.c_ulong()
+            ok = kernel32.GetExitCodeProcess(handle, ctypes.byref(code))
+            return bool(ok) and code.value == still_active
+        finally:
+            kernel32.CloseHandle(handle)
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return False
+    return True
+
+
 def _pid_is_spark(pid: int) -> bool:
-    """该 PID 是否确实是 spark.py 主任务(而非被复用的无关进程)。"""
+    """该 PID 是否确实是 spark.py 主任务(而非被复用的无关进程)。
+
+    /proc 是 Linux 专有: 其他平台(开发机)读不到 → 返回 False → 锁按陈旧接管。
+    无人值守生产只在板子上跑, 这里不为开发机另写一套进程枚举。
+    """
     try:
         cmdline = Path(f"/proc/{pid}/cmdline").read_bytes().decode("utf-8", "replace")
     except OSError:
@@ -177,7 +215,8 @@ def _acquire_pid_lock() -> bool:
                 old_pid = None
                 try:
                     old_pid = int(Path(_PID_FILE).read_text(encoding="utf-8").strip())
-                    os.kill(old_pid, 0)
+                    if not _pid_alive(old_pid):
+                        old_pid = None
                 except (ValueError, OSError):
                     old_pid = None
                 if old_pid is not None:

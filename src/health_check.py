@@ -404,8 +404,11 @@ def notify(fail_summary: str) -> bool:
 def check_headed_config() -> tuple[bool, str]:
     """有头模式配置断言(2026-09-30 事故根因: 板子 config.json 丢 headless/display
     两键 → 实际跑 headless → 渲染挂死 → 全 skip 漏发 10 人)。"""
+    # 无 config.json 不再是「跳过」而是**失败**: 跳过等于放行, 而 2026-09-30 事故
+    # 正是「配置文件不完整 → 静默跑 headless → 渲染挂死 → 全 skip 漏发」。
+    # 没有配置文件就是没有可核验的有头配置, 必须报出来。
     if not CONFIG_FILE.is_file():
-        return True, "config.json 不存在, 跳过有头模式配置检查"
+        return False, "config.json 不存在, 无法确认有头模式配置(先 cp config.example.json config.json)"
     try:
         cfg = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
     except Exception:

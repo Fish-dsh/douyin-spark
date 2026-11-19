@@ -1461,10 +1461,10 @@ class TestPidLockExemption(unittest.TestCase):
             self.assertEqual(lock.read_text(encoding="utf-8"), str(os.getpid()))
 
     def test_stale_lock_is_reclaimed(self):
-        # 用一个"肯定不存在"的 PID 模拟挂死实例留下的陈旧锁。
-        # 按 /proc 判定而非 os.kill: 后者对**别人**的进程返回 EPERM, 会被误当"已死"。
+        # 用一个"肯定不存在"的 PID 模拟挂死实例留下的陈旧锁。判定走源码的
+        # _pid_alive(不写 os.kill(pid,0): Windows 上那是 CTRL_C_EVENT, 会打断单测)。
         dead_pid = next(
-            p for p in range(999_999, 1_000, -1) if not Path(f"/proc/{p}").exists()
+            p for p in range(999_999, 1_000, -1) if not _scheduler_mod._pid_alive(p)
         )
         with tempfile.TemporaryDirectory() as tmpd:
             proj = self._mk_proj(tmpd)
@@ -1482,11 +1482,9 @@ class TestPidLockExemption(unittest.TestCase):
 
     @staticmethod
     def _pid_alive(pid: int) -> bool:
-        try:
-            os.kill(pid, 0)
-        except OSError:
-            return False
-        return True
+        # 走源码里的跨平台实现: Windows 上 os.kill(pid, 0) 是 CTRL_C_EVENT,
+        # 会把 Ctrl+C 广播进控制台进程组、打断正在跑的单测。
+        return _scheduler_mod._pid_alive(pid)
 
     CHILD_SNIPPET = (
         "import os, sys\n"
@@ -1543,12 +1541,18 @@ class TestPidLockExemption(unittest.TestCase):
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
-        for _ in range(200):  # 等 /proc 条目出现, 确保写锁时该 PID 一定存活
-            if Path(f"/proc/{proc.pid}/cmdline").exists():
+        for _ in range(200):  # 等辅助进程真起来, 确保写锁时该 PID 一定存活
+            if _scheduler_mod._pid_alive(proc.pid):
                 break
             time.sleep(0.02)
         return proc
 
+    @unittest.skipUnless(
+        sys.platform.startswith("linux"),
+        "只在 Linux 上有意义: 判定持锁者是否 spark.py 靠 /proc/<pid>/cmdline, "
+        "其他平台读不到 → _pid_is_spark 返回 False → 锁按陈旧接管(见 src/scheduler.py)。"
+        "生产无人值守只跑在板子上, 这里不给开发机伪造一套进程枚举。",
+    )
     def test_child_process_is_blocked_by_parent_lock(self):
         """跨进程复现原缺陷前提: 持锁者是**真正的 spark.py** 时, 未豁免的子进程确实争锁失败。
 
@@ -1568,6 +1572,27 @@ class TestPidLockExemption(unittest.TestCase):
             finally:
                 holder.terminate()
                 holder.wait(timeout=10)
+
+    def test_live_lock_of_unverifiable_pid_is_reclaimed(self):
+        """非 Linux 上活 PID 也无法确认是不是 spark.py → 按陈旧锁接管(跨平台既定语义)。
+
+        这条与上一条是同一逻辑的两面: Linux 用 /proc 认得出持锁者, 那就必须挡住
+        第二个实例; 认不出时宁可接管也不能让一把来路不明的活锁长期堵死无人值守任务。
+        """
+        with tempfile.TemporaryDirectory() as tmpd:
+            proj = self._mk_proj(tmpd)
+            lock = self._lock_file(proj)
+            lock.parent.mkdir(parents=True, exist_ok=True)
+            lock.write_text(str(os.getpid()), encoding="utf-8")
+            with (
+                patch.object(_scheduler_mod, "__file__", self._fake_file(proj)),
+                patch.object(_scheduler_mod, "_PID_FILE", None),
+                patch.object(_scheduler_mod, "_pid_is_spark", return_value=False),
+                patch.dict(os.environ),
+            ):
+                os.environ.pop("SPARK_SKIP_PID_LOCK", None)
+                self.assertTrue(_acquire_pid_lock())
+            self.assertEqual(lock.read_text(encoding="utf-8"), str(os.getpid()))
 
     def test_exempt_child_proceeds_despite_parent_lock(self):
         """P0-1 回归: 豁免子进程照常获锁(才能产出正向证据), 且不破坏父进程的锁。"""

@@ -1,0 +1,13 @@
+[Unit]
+Description=Xvfb virtual display for douyin-spark headed chromium
+# 抖音对 headless chromium 会弹拦截页，弱机无头还会渲染挂死，所以必须跑有头。
+# 有头又要求有 DISPLAY，无人值守机器没有物理屏幕，用 Xvfb 提供虚拟显示。
+After=network.target
+
+[Service]
+ExecStart=/usr/bin/Xvfb :99 -screen 0 800x600x24 -nolisten tcp
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

@@ -201,7 +201,10 @@ def launch_browser(p, cfg: dict):
     display: 有头模式下注入 DISPLAY 环境变量(如板子 Xvfb :99)。
     perf_profile: low(板端档) / high(本机桌面档), 见 build_launch_args。
     """
-    headless = bool(cfg.get("headless", True))
+    # 默认有头: config.load_config 已把缺失的 headless 补成 False(硬约束见
+    # AGENTS.md), 这里再跟一手, 免得绕过 load_config 直接调本函数时又悄悄
+    # 退回 headless —— 那正是会被抖音拦截页挡住、弱机渲染挂死的那条路。
+    headless = bool(cfg.get("headless", False))
     args = build_launch_args(cfg, headless)
     if not headless:
         display = cfg.get("display")

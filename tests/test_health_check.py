@@ -31,6 +31,16 @@ class TestHealthCheck(unittest.TestCase):
         # 指向一个必不存在的路径: 否则在板子上(或本机有进程在跑时)跑单测,
         # main() 会走"运行中 → 直接 return 0"分支, 把本该断言 1 的用例变成 0。
         health_check.PID_FILE = self.root / ".spark.pid"
+        # main() 现在会硬查有头模式配置(缺 config.json 直接判失败), 所以这些
+        # 关注 state/日志/告警的用例需要一个健康底座, 否则全被这条前置检查带偏。
+        health_check.CONFIG_FILE.write_text(
+            json.dumps({"headless": False, "display": ":99"}), encoding="utf-8"
+        )
+        # Xvfb 检查在开发机上不可复现: 没 systemd、没 xvfb.service, 状态随机。
+        # 统一走「无 systemctl → 跳过」分支, 保证 main() 结论只由被测项决定。
+        self._which = patch("src.health_check.shutil.which", return_value=None)
+        self._which.start()
+        self.addCleanup(self._which.stop)
 
     def tearDown(self):
         (
@@ -484,9 +494,14 @@ class TestHeadedConfigCheck(unittest.TestCase):
         health_check.CONFIG_FILE.write_text(json.dumps(cfg), encoding="utf-8")
         return health_check.check_headed_config()
 
-    def test_missing_config_skips(self):
-        ok, _ = health_check.check_headed_config()
-        self.assertTrue(ok)
+    def test_missing_config_fails(self):
+        """没有 config.json = 无法核验有头配置, 必须报失败而不是跳过。
+
+        跳过等于放行, 而 2026-09-30 事故就是配置文件不完整 → 静默跑 headless
+        → 渲染挂死 → 全部好友 skip 漏发。"""
+        ok, msg = health_check.check_headed_config()
+        self.assertFalse(ok)
+        self.assertIn("config.json", msg)
 
     def test_correct_headed_config_ok(self):
         ok, _ = self._cfg({"headless": False, "display": ":99"})
@@ -503,6 +518,23 @@ class TestHeadedConfigCheck(unittest.TestCase):
 
 
 class TestXvfbCheck(unittest.TestCase):
+    """Xvfb 常驻服务检查。
+
+    必须自带 config.json: check_xvfb_display 无配置时直接跳过, 否则在开发机上
+    (无 config.json)三个用例全走跳过分支, 断言 active/inactive 根本测不到。"""
+
+    def setUp(self):
+        self.tmpdir = tempfile.TemporaryDirectory()
+        self.old_config = health_check.CONFIG_FILE
+        health_check.CONFIG_FILE = Path(self.tmpdir.name) / "config.json"
+        health_check.CONFIG_FILE.write_text(
+            json.dumps({"headless": False, "display": ":99"}), encoding="utf-8"
+        )
+
+    def tearDown(self):
+        health_check.CONFIG_FILE = self.old_config
+        self.tmpdir.cleanup()
+
     def test_skips_without_systemctl(self):
         with patch("src.health_check.shutil.which", return_value=None):
             ok, msg = health_check.check_xvfb_display()
@@ -531,9 +563,6 @@ class TestXvfbCheck(unittest.TestCase):
             ok, msg = health_check.check_xvfb_display()
         self.assertFalse(ok)
         self.assertIn("xvfb", msg)
-
-
-
 
 
 class TestRunInProgressGate(unittest.TestCase):

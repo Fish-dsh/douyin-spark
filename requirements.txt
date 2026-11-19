@@ -1,4 +1,10 @@
+# 运行时依赖
 playwright==1.52.0
-ruff==0.16.8
-# Emergency Visual Fallback 定位层 (src/vision_cv.py); 未安装时该层自动降级放弃, 主链路不受影响
+
+# 视觉兜底定位层 (src/vision_cv.py)。装了才有 CV 粗定位那一路;
+# 未装时 src/vision_cv.py 里 cv2=None, 该层自动放弃, 主链路不受影响。
+# 生产板子上是装了的, 但能省内存的弱机可以不装。
 opencv-python-headless==5.0.0.93
+
+# 开发/CI 依赖(跑 lint 需要, 运行主链路不需要)
+ruff==0.16.8

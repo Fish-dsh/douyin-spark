@@ -73,6 +73,25 @@ class TestLoadConfig(unittest.TestCase):
 
         self.assertTrue(cfg["block_resources"])
 
+    def test_missing_headless_defaults_false(self):
+        """没写 headless 时必须补成 false(有头硬约束), 不能靠下游默认值兜。
+
+        2026-09-30 事故: 板子 config.json 丢 headless/display 两键, 于是静默
+        跑 headless, 渲染挂死, 当晚全部好友 skip 漏发。"""
+        self.config_path.write_text(json.dumps({"send_window": {}}), encoding="utf-8")
+        with patch("src.config.CONFIG_FILE", self.config_path):
+            cfg = load_config()
+        self.assertIs(cfg["headless"], False)
+
+    def test_headless_true_is_kept_but_warned(self):
+        """显式写 headless=true 仍照配置生效(桌面档调试要用), 但会告警。"""
+        self.config_path.write_text(
+            json.dumps({"send_window": {}, "headless": True}), encoding="utf-8"
+        )
+        with patch("src.config.CONFIG_FILE", self.config_path):
+            cfg = load_config()
+        self.assertTrue(cfg["headless"])
+
     def test_invalid_json_exits(self):
         self.config_path.write_text("not valid json", encoding="utf-8")
 
@@ -376,15 +395,22 @@ class TestEnvPath(unittest.TestCase):
             self.assertEqual(config._env_path("SPARK_RUNTIME_DIR", default), default)
 
     def test_absolute_passthrough(self):
-        from pathlib import Path as _Path
+        """绝对路径原样透传, 不拼到项目根下。
+
+        用临时目录而不是写死 /tmp: Windows 上 Path("/tmp/x").is_absolute() 为
+        False(缺盘符), 写死 POSIX 路径的断言在开发机上必挂, 属测试自身的平台
+        假设, 不是被测逻辑错。"""
         from unittest.mock import patch
 
         from src import config
 
-        with patch.dict("os.environ", {"SPARK_RUNTIME_DIR": "/tmp/spark-x"}):
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            patch.dict("os.environ", {"SPARK_RUNTIME_DIR": tmp}),
+        ):
             self.assertEqual(
                 config._env_path("SPARK_RUNTIME_DIR", config.BASE_DIR / "runtime"),
-                _Path("/tmp/spark-x"),
+                Path(tmp),
             )
 
 

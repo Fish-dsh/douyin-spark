@@ -5,6 +5,8 @@
 日志里看得见却没人统计出来)。所以每条判据都要有正例和反例。
 """
 
+from __future__ import annotations
+
 import ast
 import contextlib
 import gzip
