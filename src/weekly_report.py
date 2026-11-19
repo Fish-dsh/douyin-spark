@@ -470,8 +470,10 @@ def build_report(
     return "\n".join(lines)
 
 
-def run(days_back: int = 7) -> int:
-    now = datetime.now()  # noqa: DTZ005 — 全项目时间口径=机器本地时(见 config.py 头注释)
+def run(days_back: int = 7, *, now: datetime | None = None) -> int:
+    # now 可注入: 窗口会按"已结束的夜晚"收缩(JUDGE_AFTER_HOUR 前后翻转),
+    # 测试若依赖真实时钟, 跨过午夜就必然红 -- 那是用例缺陷, 不是周报缺陷。
+    now = now or datetime.now()  # noqa: DTZ005 — 全项目时间口径=机器本地时(见 config.py 头注释)
     today = now.date()
     # 昨晚那一轮的日志日期是"今天"(00:00 起跑), 截到昨天就会把最近一晚整个漏掉;
     # 而凌晨 2 点前今天这轮可能还在跑, 交给 build_report 的"今天不判漏跑"兜住。

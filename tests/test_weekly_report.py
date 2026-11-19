@@ -13,6 +13,9 @@ from unittest import mock
 from src import weekly_report
 
 TODAY = date(2026, 11, 1)  # 周日; 已结束的夜晚 = 10-31 往前
+# run() 用的固定时钟(周日下午, 已过 JUDGE_AFTER_HOUR): 不钉死就会在
+# 00:00-02:00 之间翻转为"end=昨天", 让 3 个用例只在特定时段才绿。
+NOW = datetime(2026, 11, 1, 14, 0)
 
 
 def _d(month: int, day: int) -> date:
@@ -179,7 +182,7 @@ class TestBuildReport(unittest.TestCase):
 
 class TestRun(unittest.TestCase):
     def test_run_writes_report_and_never_notifies(self):
-        today = datetime.now().date()
+        today = NOW.date()
         day = today - timedelta(days=1)
         with tempfile.TemporaryDirectory() as tmp:
             log = _write(
@@ -195,7 +198,7 @@ class TestRun(unittest.TestCase):
                 ),
                 mock.patch("src.health_check.notify") as notify,
             ):
-                self.assertEqual(weekly_report.run(days_back=7), 0)
+                self.assertEqual(weekly_report.run(days_back=7, now=NOW), 0)
             written = report_file.read_text(encoding="utf-8")
         self.assertIn("【续火花周报】", written)
         # 只有 1 晚日志 → 窗口必须收缩到覆盖起点, 不能诬告其余 6 晚"没跑"
@@ -206,7 +209,7 @@ class TestRun(unittest.TestCase):
 
     def test_last_night_is_counted(self):
         """最近一晚(日志日期=今天)必须计入, 不能被"今天还没到"逻辑吞掉。"""
-        today = datetime.now().date()
+        today = NOW.date()
         with tempfile.TemporaryDirectory() as tmp:
             log = _write(
                 Path(tmp) / "spark.log",
@@ -223,14 +226,14 @@ class TestRun(unittest.TestCase):
                     weekly_report, "_account_names", return_value=["main"]
                 ),
             ):
-                self.assertEqual(weekly_report.run(days_back=7), 0)
+                self.assertEqual(weekly_report.run(days_back=7, now=NOW), 0)
             written = report_file.read_text(encoding="utf-8")
         self.assertIn("共续上 9 次", written)
         self.assertNotIn("完全没有日志", written)
 
     def test_missing_night_inside_coverage_still_reported(self):
         """日志覆盖得够久时, 中间的空档仍必须报出来(不能被覆盖逻辑吞掉)。"""
-        today = datetime.now().date()
+        today = NOW.date()
         oldest = today - timedelta(days=9)
         with tempfile.TemporaryDirectory() as tmp:
             log = _write(
@@ -249,7 +252,7 @@ class TestRun(unittest.TestCase):
                     weekly_report, "_account_names", return_value=["main"]
                 ),
             ):
-                self.assertEqual(weekly_report.run(days_back=7), 0)
+                self.assertEqual(weekly_report.run(days_back=7, now=NOW), 0)
             written = report_file.read_text(encoding="utf-8")
         self.assertIn("这 7 晚", written)
         self.assertIn("完全没有日志", written)
