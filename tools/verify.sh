@@ -8,9 +8,13 @@
 # 用法:
 #   tools/verify.sh            # 全跑
 #   tools/verify.sh --fast     # 跳过单测, 只做语法和 lint
+#   PY=/path/to/python tools/verify.sh    # 指定解释器(交叉验证另一版本时用)
 #
-# 注意: 本地通过 != 远端 CI 通过。这里没有第二台机器、第二个 Python 版本,
-# 也没有干净环境 —— 它证明的是"在我这台机器上过了", 不是"在别人机器上会过"。
+# 退出码: 0 全过 / 1 有检查失败 / 2 没失败但有步骤因缺工具被跳过
+#         (2 表示"没验证到", 不是"验证过了", 别把它当绿)。
+#
+# 注意: 本地通过 != 远端 CI 通过。这里只有一台机器、一个 Python 版本、
+# 一个非干净环境 —— 它证明的是"在我这台机器上过了", 不是"在别人机器上会过"。
 set -uo pipefail
 
 cd "$(dirname "$0")/.." || exit 1
@@ -25,6 +29,7 @@ elif command -v python3 >/dev/null 2>&1; then
   PY=python3
 else
   echo "找不到 python3, 也没有 .venv/bin/python" >&2
+  echo "先建环境: python3 -m venv .venv && .venv/bin/pip install -r requirements.txt" >&2
   exit 1
 fi
 
@@ -32,7 +37,9 @@ fi
 export SPARK_RUNTIME_DIR="${SPARK_RUNTIME_DIR:-/tmp/spark-verify-runtime}"
 
 FAILED=0
+SKIPPED=0
 step() { printf '\n== %s ==\n' "$1"; }
+skip() { echo "跳过: $1"; SKIPPED=$((SKIPPED + 1)); }
 
 step "1/3 语法 (compileall)"
 if "$PY" -m compileall -q src tests tools spark.py login.py logutil.py; then
@@ -42,23 +49,28 @@ else
   FAILED=1
 fi
 
+# ruff / pytest 属于开发依赖, 干净机器上没装是正常的 —— 那是"没验证到",
+# 报错退出只会让新人以为代码有问题。缺工具记 SKIP, 工具报错才记 FAIL。
 step "2/3 lint (ruff)"
-if "$PY" -m ruff check . ; then
+if ! "$PY" -c "import ruff" >/dev/null 2>&1 && ! "$PY" -m ruff --version >/dev/null 2>&1; then
+  skip "没装 ruff (pip install ruff==0.16.8)"
+elif "$PY" -m ruff check . ; then
   echo "OK"
 else
-  echo "FAIL: 没装 ruff 的话跑 pip install ruff==0.16.8" >&2
+  echo "FAIL" >&2
   FAILED=1
 fi
 
 if [ "${1:-}" = "--fast" ]; then
   step "3/3 单测"
-  echo "跳过 (--fast)"
+  skip "--fast 只做语法和 lint"
 else
-  step "3/3 单测 (pytest)"
-  # 优先 pytest, 没装就退回 unittest discover。
+  step "3/3 单测"
+  # 优先 pytest, 没装就退回 unittest discover(标准库, 一定在)。
   if "$PY" -c "import pytest" >/dev/null 2>&1; then
     if "$PY" -m pytest tests -q -p no:cacheprovider; then :; else FAILED=1; fi
   else
+    echo "提示: 没装 pytest, 退回 unittest discover(等价覆盖, 输出更啰嗦)"
     if "$PY" -m unittest discover -s tests; then :; else FAILED=1; fi
   fi
 fi
@@ -66,5 +78,9 @@ fi
 if [ "$FAILED" -ne 0 ]; then
   printf '\n自检未通过\n' >&2
   exit 1
+fi
+if [ "$SKIPPED" -ne 0 ]; then
+  printf '\n没有失败, 但有 %d 项被跳过 —— 那不是"通过", 是"没验证到"。\n' "$SKIPPED"
+  exit 2
 fi
 printf '\n全部通过（本地环境，不代表远端 CI）\n'

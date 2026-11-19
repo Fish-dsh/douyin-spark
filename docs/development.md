@@ -24,7 +24,10 @@ python3 -m venv .venv
 ./tools/verify.sh           # 全跑
 ./tools/verify.sh --fast    # 只做语法 + lint
 make verify                 # 等价，装了 make 就能用
+PY=/usr/bin/python3.11 ./tools/verify.sh   # 换一个解释器交叉验证
 ```
+
+退出码分三种：`0` 全过；`1` 有检查真失败；`2` **没有失败但有步骤被跳过**（干净机器上没装 ruff / 用了 `--fast` 就属于这类）。`2` 不是绿 —— 它表示「没验证到」，别在脚本里把它当通过。
 
 分开跑也行：
 
