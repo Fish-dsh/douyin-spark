@@ -3,33 +3,15 @@
 from __future__ import annotations
 
 import re
+from collections import namedtuple
 
 from playwright.sync_api import Page
 
 from logutil import log
 
+from . import events, perf, vision, vision_cv
 from .debug import dump_page
 from .finder import find
-
-try:
-    from . import perf
-except ImportError:  # 以顶层模块方式加载时(src/ 在 sys.path 上)
-    import perf  # type: ignore[no-redef]
-
-try:
-    from . import events
-except ImportError:  # 以顶层模块方式加载时(src/ 在 sys.path 上)
-    import events  # type: ignore[no-redef]
-
-try:
-    from . import vision
-except ImportError:  # 以顶层模块方式加载时(src/ 在 sys.path 上)
-    import vision  # type: ignore[no-redef]
-
-try:
-    from . import vision_cv
-except ImportError:
-    import vision_cv  # type: ignore[no-redef]
 
 INPUT_SELECTORS = [
     "[contenteditable='true']",
@@ -787,10 +769,6 @@ def _evidence(base: tuple, n1, last1: str, prev1: str) -> tuple:
     return False, f"无任何新增(数量仍 {n0}, 尾部仍 {last1[:24]!r})"
 
 
-def tail_evidence(before: tuple, page: Page) -> tuple:
-    """读一次当前尾部并与基线比较; 供表情层这类「自带成功判据」的路径复核用。"""
-    return _evidence(before, *read_tail(page))
-
 
 def confirm_send(
     page: Page,
@@ -1354,6 +1332,308 @@ def synthetic_click_row(page: Page, name: str):
         return None
 
 
+
+# 表情层: 四个 JS 探针提到模块级, 与下面 _JS_EDITABLE_RECT/_JS_SET_BOX_TEXT 一致。
+_JS_FIND_EMOJI_BTN = """() => {
+    const editable = document.querySelector('[contenteditable="true"]');
+    if (!editable) return null;
+    const ir = editable.getBoundingClientRect();
+    // 语义锚点优先: title/aria-label/data-e2e 比混淆类名与像素位置更抗改版
+    for (const el of document.querySelectorAll('[title], [aria-label], [data-e2e]')) {
+        const m = ((el.getAttribute('title') || '') + '|' +
+                   (el.getAttribute('aria-label') || '') + '|' +
+                   (el.getAttribute('data-e2e') || '')).toLowerCase();
+        if (!/表情|emoji/.test(m)) continue;
+        const r = el.getBoundingClientRect();
+        if (r.width > 0 && r.height > 0 && r.y > ir.y - 200) {
+            return {x: Math.round(r.x + r.width / 2),
+                    y: Math.round(r.y + r.height / 2)};
+        }
+    }
+    // 2026-11-01 板端 DOM 实测: 表情键是 <svg class="messageMsgInputiconAction">,
+    // 既无 title/aria-label/data-e2e, 只能靠类名 —— 像素启发会先扫到它左边的
+    // 上传键, 坐标偏一格就点空(面板不开), 所以类名优先于像素。
+    for (const el of document.querySelectorAll('[class*="iconAction"]')) {
+        const r = el.getBoundingClientRect();
+        if (r.width >= 12 && r.width <= 48 && r.height >= 12 && r.height <= 48
+            && r.y > ir.y - 200
+            && !/upload|file|publish/i.test((el.className || '').toString())) {
+            return {x: Math.round(r.x + r.width / 2),
+                    y: Math.round(r.y + r.height / 2)};
+        }
+    }
+    // 像素启发兜底: 先 svg 后 img, 容忍度放宽
+    for (const sel of ['svg', 'img']) {
+        for (const el of document.querySelectorAll(sel)) {
+            const r = el.getBoundingClientRect();
+            if (Math.abs(r.y - ir.y) < 60 && r.x > ir.right - 5
+                && r.width >= 12 && r.width <= 48) {
+                const p = el.parentElement;
+                const cls = p ? (p.className || '').toString() : '';
+                if (/upload|file/i.test(cls)) continue;
+                return {x: Math.round(r.x + r.width / 2),
+                        y: Math.round(r.y + r.height / 2)};
+            }
+        }
+    }
+    return null;
+}"""
+
+_JS_FIND_STICKER = """(name) => {
+    const panel = document.querySelector(
+        '[class*="emojiPanel"], [class*="stickerPanel"], [data-e2e*="emoji"]');
+    let items = [];
+    if (panel) {
+        items = panel.querySelectorAll('[class*="emojiItem"]:not([class*="Desc"])');
+    }
+    if (!items.length) {
+        // 面板类名失效: 全页搜索表情项(仅面板打开时才有可见尺寸)
+        items = document.querySelectorAll(
+            '[class*="emojiItem"]:not([class*="Desc"]), [class*="stickerItem"]');
+    }
+    let occluded = null;
+    for (const item of items) {
+        if (!(item.innerText || '').trim().includes(name)) continue;
+        let r = item.getBoundingClientRect();
+        if (!(r.width > 0 && r.height > 0)) continue;
+        // 面板是滚动容器: 目标可能在可视区外但矩形仍有尺寸, 直接点会点到面板外
+        try { item.scrollIntoView({block: 'nearest', inline: 'nearest'}); } catch (e) {}
+        r = item.getBoundingClientRect();
+        const x = Math.round(r.x + r.width / 2);
+        const y = Math.round(r.y + r.height / 2);
+        if (x <= 0 || y <= 0 || x >= window.innerWidth || y >= window.innerHeight) continue;
+        const hit = document.elementFromPoint(x, y);
+        if (!hit) continue;
+        if (hit !== item && !item.contains(hit) && !hit.contains(item)) {
+            if (!occluded) occluded = {x: x, y: y, tag: hit.tagName,
+                cls: (hit.className || '').toString().slice(0, 40)};
+            continue;
+        }
+        return {x: x, y: y};
+    }
+    if (occluded) return {error: 'sticker_occluded', at: occluded};
+    return {error: 'sticker_not_found'};
+}"""
+
+_JS_PANEL_VISIBLE = """() => {
+    for (const p of document.querySelectorAll(
+        '[class*="emojiPanel"], [class*="stickerPanel"], [data-e2e*="emoji"]')) {
+        const r = p.getBoundingClientRect();
+        if (r.width > 100 && r.height > 100) return true;
+    }
+    let n = 0;
+    for (const it of document.querySelectorAll('[class*="emojiItem"], [class*="stickerItem"]')) {
+        const r = it.getBoundingClientRect();
+        if (r.width > 0 && r.height > 0 && ++n >= 8) return true;
+    }
+    return false;
+}"""
+
+_JS_PANEL_CLOSED = """() => {
+    for (const p of document.querySelectorAll(
+        '[class*="emojiPanel"], [class*="stickerPanel"], [data-e2e*="emoji"]')) {
+        const r = p.getBoundingClientRect();
+        if (r.width >= 100 && r.height >= 100) return false;
+    }
+    let n = 0;
+    for (const it of document.querySelectorAll('[class*="emojiItem"], [class*="stickerItem"]')) {
+        const r = it.getBoundingClientRect();
+        if (r.width > 0 && r.height > 0 && ++n >= 8) return false;
+    }
+    return true;
+}"""
+
+# 表情层事件的四个公共字段: 同一次 attempt 串成链路, parent 指向失败的上游层。
+_StickerTrace = namedtuple("_StickerTrace", "friend account attempt parent")
+
+
+def _emit_sticker(trace, action: str, result: str, **extra) -> None:
+    """表情层的结构化事件: 各出口共用同一组 friend/account/attempt/parent。"""
+    events.emit(
+        "sticker",
+        action,
+        result,
+        friend=trace.friend,
+        account=trace.account,
+        attempt=trace.attempt,
+        parent=trace.parent,
+        **extra,
+    )
+
+
+def _open_sticker_panel(page: Page, trace) -> tuple:
+    """找表情按钮并展开面板, 等到内容加载完。返回 (是否打开, 失败原因)。"""
+    btn = page.evaluate(_JS_FIND_EMOJI_BTN)
+    if not btn:
+        _emit_sticker(trace, "find_button", "failed", error_class="no_emoji_btn")
+        return False, "未找到表情按钮"
+    log(f"[表情] 表情按钮: ({btn['x']},{btn['y']})")
+    _emit_sticker(trace, "find_button", "ok", extra={"x": btn["x"], "y": btn["y"]})
+
+    # 2026-11-02: 实测 page.mouse.click 在本机(无窗口管理器的 Xvfb)完全无效,
+    # 表情面板根本弹不出来, 必须走 JS 合成事件。而且优先「按选择器就地派发」
+    # 而不是「按先前量到的坐标点」: 板端 14 天里有 18 次「表情面板未打开」,
+    # 都是量完坐标到真正点下去之间输入栏重排了(草稿变高/多行), 按钮挪了十几
+    # 像素, 点在空白上。面板是否真打开由下面的 _JS_PANEL_VISIBLE 复核。
+    opened_by_sel = False
+    for sel in EMOJI_BTN_SELECTORS:
+        if synthetic_click(page, sel):
+            opened_by_sel = True
+            break
+    if not opened_by_sel:
+        synthetic_click_at(page, btn["x"], btn["y"])
+
+    # 面板打开等待: 循环内一检测到即 break, 故加大上限只影响「本会失败」的场景,
+    # 对正常好友(<3s 打开)零延迟。2026-10-06 好友A实测: 经 synthetic_click_row
+    # 抢救刚挂载的面板, 其工具栏初始化更慢, 表情面板在点击后 >3s 才渲染出
+    # (截图证实最终打开且 续火花 表情可见), 旧 6×500ms 窗口过早判失败退到文字兜底,
+    # 而兜底又因面板此时刚弹出发起 Enter 被拦截 → 假发送。放宽到 12×500ms=6s。
+    opened = False
+    _rounds = max(1, perf.ms("panel_open_ms") // max(1, perf.ms("panel_poll_ms")))
+    for _ in range(_rounds):
+        page.wait_for_timeout(perf.ms("panel_poll_ms"))
+        if page.evaluate(_JS_PANEL_VISIBLE):
+            opened = True
+            break
+    if not opened:
+        _emit_sticker(trace, "open_panel", "failed", error_class="panel_not_open")
+        return False, "表情面板未打开"
+
+    try:
+        page.wait_for_selector(
+            '[class*="emojiItem"]:not([class*="Desc"]), [class*="stickerItem"]',
+            state="visible",
+            timeout=perf.ms("panel_items_ms"),
+        )
+    except Exception:
+        _emit_sticker(
+            trace, "load_panel", "failed", error_class="panel_content_timeout"
+        )
+        return False, "表情面板内容未加载"
+    return True, ""
+
+
+def _pick_sticker(page: Page, sticker_name: str, trace) -> tuple:
+    """在已展开的面板里找目标表情。返回 (坐标, 失败原因); 失败时坐标为 None。"""
+    target = page.evaluate(_JS_FIND_STICKER, sticker_name)
+    if "error" in target:
+        _emit_sticker(trace, "find_item", "failed", error_class=target.get("error"))
+        if target.get("error") == "sticker_occluded":
+            at = target.get("at") or {}
+            return None, (
+                f"表情项被遮挡, 点不到: ({at.get('x')},{at.get('y')}) 处是 "
+                f"{at.get('tag', '')}.{at.get('cls', '')}"
+            )
+        return None, f"表情面板中未找到『{sticker_name}』"
+    log(f"[表情] 目标表情: ({target['x']},{target['y']})")
+    _emit_sticker(
+        trace, "find_item", "ok", extra={"x": target["x"], "y": target["y"]}
+    )
+    return target, ""
+
+
+def _await_sticker_result(page: Page, sticker_name: str, target, trace) -> tuple:
+    """点下去再判结果: 点击本身不是证据, 只看会话尾部有没有新增。"""
+    # 基线必须在**点击表情之前**取: 文案固定为「续火花」, 昨晚那条表情还挂在列表
+    # 尾部, 只比文本会把残留读成本次发送。
+    base = read_tail(page)
+    # 「找到就点」一次做完: 先 _JS_FIND_STICKER 量坐标、再由 Python 派发点击,
+    # 中间面板还在做入场动画(或滚动吸附), 量到的矩形和真正点击那一刻差几十
+    # 像素就点空 —— 面板关了、一条新消息都没有(板端 6 次「表情面板已关闭但
+    # 无任何新增」全是这类)。_JS_CLICK_STICKER 内部就地派发, 失败才退回坐标。
+    clicked = page.evaluate(_JS_CLICK_STICKER, sticker_name)
+    if not (isinstance(clicked, dict) and clicked.get("ok")):
+        why = (clicked or {}).get("error") if isinstance(clicked, dict) else None
+        log(f"[表情] 元素内派发失败({why}), 退回坐标点击", level="WARN")
+        synthetic_click_at(page, target["x"], target["y"])
+    else:
+        log(f"[表情] 已在表情项上派发点击: ({clicked['x']},{clicked['y']})")
+    # 点击本身不是证据(没抛异常≠发出去了), verified 只能是 None
+    _emit_sticker(
+        trace,
+        "click_item",
+        "ok",
+        verified=None,
+        extra={"x": target["x"], "y": target["y"], "n0": base[0]},
+    )
+
+    # 点击表情后抖音自动发送并关闭面板。确认信号(2026-10-07 审计后重排):
+    # 1) 有「新增气泡/尾部窗口移动」的硬证据 -> 明确成功(最强)
+    # 2) 面板关闭但证据读不到(列表容器定位失败) -> 沿用旧口径判成功, 标注「降级」
+    #    让 strat_stats 能统计这一层的失证比例, 不把它当成验证过
+    # 3) 面板关闭但证据可读且**毫无新增** -> 判未发送(表情点了个空)
+    # 注意: 表情发送成功后不要再走文字兜底, 避免重复发送。
+    closed_no_ev = None
+    for i in range(6):
+        # 性能(2026-11-01): 首拍 250ms(气泡通常立刻出现), 之后维持 500ms。
+        page.wait_for_timeout(
+            perf.ms("tail_first_ms") if i == 0 else perf.ms("tail_poll_ms")
+        )
+        n1, last, prev = read_tail(page)
+        ev, ev_msg = _evidence(base, n1, last, prev)
+        if ev is True:
+            if sticker_name in last or page.evaluate(_JS_PANEL_CLOSED):
+                _emit_sticker(
+                    trace,
+                    "verify",
+                    "ok",
+                    verified=True,
+                    extra={
+                        "ev": ev_msg,
+                        "bubble": n1,
+                        "text_match": sticker_name in last,
+                        "last_is_self": last_bubble_is_self(page),
+                    },
+                )
+                return True, f"表情已发送: {sticker_name} ({ev_msg})"
+            continue
+        if ev is None:
+            if sticker_name in last:
+                _emit_sticker(
+                    trace,
+                    "verify",
+                    "ok",
+                    verified=None,
+                    extra={
+                        "degraded": ev_msg,
+                        "text_match": True,
+                        "last_is_self": last_bubble_is_self(page),
+                    },
+                )
+                return (
+                    True,
+                    f"表情已发送(降级 {ev_msg}): {sticker_name} (最新消息匹配 {last[:30]!r})",
+                )
+            if page.evaluate(_JS_PANEL_CLOSED):
+                _emit_sticker(
+                    trace,
+                    "verify",
+                    "ok",
+                    verified=None,
+                    extra={"degraded": ev_msg},
+                )
+                return (
+                    True,
+                    f"表情已发送(降级 {ev_msg}): {sticker_name} (面板已关闭, 抖音自动发送)",
+                )
+            continue
+        if page.evaluate(_JS_PANEL_CLOSED):
+            # 不立即返回: 新气泡可能渲染滞后, 用满本轮窗口再下结论。
+            closed_no_ev = ev_msg
+    if closed_no_ev is not None:
+        # 证据可读且零新增 = 确证没发出去(表情点了个空)
+        _emit_sticker(
+            trace, "verify", "failed", verified=False, extra={"ev": closed_no_ev}
+        )
+        return False, f"表情面板已关闭但{closed_no_ev}, 判未发送"
+    # 面板没关、窗口用尽: 分不清「没发出」与「发出但面板没关」→ unknown 更诚实
+    _emit_sticker(trace, "verify", "unknown", verified=None)
+    return (
+        False,
+        f"表情面板未关闭, 发送可能失败 (最新消息 {read_tail(page)[1][:30]!r})",
+    )
+
+
 def send_sticker(
     page: Page,
     sticker_name: str,
@@ -1365,360 +1645,23 @@ def send_sticker(
 ) -> tuple:
     """发送抖音内置表情包; 返回 (是否已尝试, 生效策略描述)。
 
-    流程: 找表情按钮 → 打开面板 → 等待内容加载 → 找指定表情 → 点击(自动发送)。
+    流程: 找表情按钮并展开面板 → 等内容加载 → 找指定表情 → 点击(自动发送)
+    → 按会话尾部新增判定结果。三步各在本文件的私有函数里, 判据顺序不动。
 
     attempt/parent 用于结构化事件(2026-11-01): 同一好友的同一轮尝试共用
     一个 attempt id, 上一层失败的 id 作为下一层的 parent, 才能算出「独立救回」。
     """
-    aid = attempt or events.attempt_id()
-    JS_FIND_EMOJI_BTN = """() => {
-        const editable = document.querySelector('[contenteditable="true"]');
-        if (!editable) return null;
-        const ir = editable.getBoundingClientRect();
-        // 语义锚点优先: title/aria-label/data-e2e 比混淆类名与像素位置更抗改版
-        for (const el of document.querySelectorAll('[title], [aria-label], [data-e2e]')) {
-            const m = ((el.getAttribute('title') || '') + '|' +
-                       (el.getAttribute('aria-label') || '') + '|' +
-                       (el.getAttribute('data-e2e') || '')).toLowerCase();
-            if (!/表情|emoji/.test(m)) continue;
-            const r = el.getBoundingClientRect();
-            if (r.width > 0 && r.height > 0 && r.y > ir.y - 200) {
-                return {x: Math.round(r.x + r.width / 2),
-                        y: Math.round(r.y + r.height / 2)};
-            }
-        }
-        // 2026-11-01 板端 DOM 实测: 表情键是 <svg class="messageMsgInputiconAction">,
-        // 既无 title/aria-label/data-e2e, 只能靠类名 —— 像素启发会先扫到它左边的
-        // 上传键, 坐标偏一格就点空(面板不开), 所以类名优先于像素。
-        for (const el of document.querySelectorAll('[class*="iconAction"]')) {
-            const r = el.getBoundingClientRect();
-            if (r.width >= 12 && r.width <= 48 && r.height >= 12 && r.height <= 48
-                && r.y > ir.y - 200
-                && !/upload|file|publish/i.test((el.className || '').toString())) {
-                return {x: Math.round(r.x + r.width / 2),
-                        y: Math.round(r.y + r.height / 2)};
-            }
-        }
-        // 像素启发兜底: 先 svg 后 img, 容忍度放宽
-        for (const sel of ['svg', 'img']) {
-            for (const el of document.querySelectorAll(sel)) {
-                const r = el.getBoundingClientRect();
-                if (Math.abs(r.y - ir.y) < 60 && r.x > ir.right - 5
-                    && r.width >= 12 && r.width <= 48) {
-                    const p = el.parentElement;
-                    const cls = p ? (p.className || '').toString() : '';
-                    if (/upload|file/i.test(cls)) continue;
-                    return {x: Math.round(r.x + r.width / 2),
-                            y: Math.round(r.y + r.height / 2)};
-                }
-            }
-        }
-        return null;
-    }"""
-    JS_FIND_STICKER = """(name) => {
-        const panel = document.querySelector(
-            '[class*="emojiPanel"], [class*="stickerPanel"], [data-e2e*="emoji"]');
-        let items = [];
-        if (panel) {
-            items = panel.querySelectorAll('[class*="emojiItem"]:not([class*="Desc"])');
-        }
-        if (!items.length) {
-            // 面板类名失效: 全页搜索表情项(仅面板打开时才有可见尺寸)
-            items = document.querySelectorAll(
-                '[class*="emojiItem"]:not([class*="Desc"]), [class*="stickerItem"]');
-        }
-        let occluded = null;
-        for (const item of items) {
-            if (!(item.innerText || '').trim().includes(name)) continue;
-            let r = item.getBoundingClientRect();
-            if (!(r.width > 0 && r.height > 0)) continue;
-            // 面板是滚动容器: 目标可能在可视区外但矩形仍有尺寸, 直接点会点到面板外
-            try { item.scrollIntoView({block: 'nearest', inline: 'nearest'}); } catch (e) {}
-            r = item.getBoundingClientRect();
-            const x = Math.round(r.x + r.width / 2);
-            const y = Math.round(r.y + r.height / 2);
-            if (x <= 0 || y <= 0 || x >= window.innerWidth || y >= window.innerHeight) continue;
-            const hit = document.elementFromPoint(x, y);
-            if (!hit) continue;
-            if (hit !== item && !item.contains(hit) && !hit.contains(item)) {
-                if (!occluded) occluded = {x: x, y: y, tag: hit.tagName,
-                    cls: (hit.className || '').toString().slice(0, 40)};
-                continue;
-            }
-            return {x: x, y: y};
-        }
-        if (occluded) return {error: 'sticker_occluded', at: occluded};
-        return {error: 'sticker_not_found'};
-    }"""
-    JS_PANEL_VISIBLE = """() => {
-        for (const p of document.querySelectorAll(
-            '[class*="emojiPanel"], [class*="stickerPanel"], [data-e2e*="emoji"]')) {
-            const r = p.getBoundingClientRect();
-            if (r.width > 100 && r.height > 100) return true;
-        }
-        let n = 0;
-        for (const it of document.querySelectorAll('[class*="emojiItem"], [class*="stickerItem"]')) {
-            const r = it.getBoundingClientRect();
-            if (r.width > 0 && r.height > 0 && ++n >= 8) return true;
-        }
-        return false;
-    }"""
-    JS_PANEL_CLOSED = """() => {
-        for (const p of document.querySelectorAll(
-            '[class*="emojiPanel"], [class*="stickerPanel"], [data-e2e*="emoji"]')) {
-            const r = p.getBoundingClientRect();
-            if (r.width >= 100 && r.height >= 100) return false;
-        }
-        let n = 0;
-        for (const it of document.querySelectorAll('[class*="emojiItem"], [class*="stickerItem"]')) {
-            const r = it.getBoundingClientRect();
-            if (r.width > 0 && r.height > 0 && ++n >= 8) return false;
-        }
-        return true;
-    }"""
-
+    trace = _StickerTrace(friend, account, attempt or events.attempt_id(), parent)
     try:
-        btn = page.evaluate(JS_FIND_EMOJI_BTN)
-        if not btn:
-            events.emit(
-                "sticker",
-                "find_button",
-                "failed",
-                friend=friend,
-                account=account,
-                attempt=aid,
-                error_class="no_emoji_btn",
-            )
-            return False, "未找到表情按钮"
-        log(f"[表情] 表情按钮: ({btn['x']},{btn['y']})")
-        events.emit(
-            "sticker",
-            "find_button",
-            "ok",
-            friend=friend,
-            account=account,
-            attempt=aid,
-            extra={"x": btn["x"], "y": btn["y"]},
-        )
-        # 2026-11-02: 实测 page.mouse.click 在本机(无窗口管理器的 Xvfb)完全无效,
-        # 表情面板根本弹不出来, 必须走 JS 合成事件。而且优先「按选择器就地派发」
-        # 而不是「按先前量到的坐标点」: 板端 14 天里有 18 次「表情面板未打开」,
-        # 都是量完坐标到真正点下去之间输入栏重排了(草稿变高/多行), 按钮挪了十几
-        # 像素, 点在空白上。面板是否真打开由下面的 JS_PANEL_VISIBLE 复核。
-        opened_by_sel = False
-        for sel in EMOJI_BTN_SELECTORS:
-            if synthetic_click(page, sel):
-                opened_by_sel = True
-                break
-        if not opened_by_sel:
-            synthetic_click_at(page, btn["x"], btn["y"])
-
-        # 面板打开等待: 循环内一检测到即 break, 故加大上限只影响「本会失败」的场景,
-        # 对正常好友(<3s 打开)零延迟。2026-10-06 好友A实测: 经 synthetic_click_row
-        # 抢救刚挂载的面板, 其工具栏初始化更慢, 表情面板在点击后 >3s 才渲染出
-        # (截图证实最终打开且 续火花 表情可见), 旧 6×500ms 窗口过早判失败退到文字兜底,
-        # 而兜底又因面板此时刚弹出发起 Enter 被拦截 → 假发送。放宽到 12×500ms=6s。
-        opened = False
-        _rounds = max(1, perf.ms("panel_open_ms") // max(1, perf.ms("panel_poll_ms")))
-        for _ in range(_rounds):
-            page.wait_for_timeout(perf.ms("panel_poll_ms"))
-            if page.evaluate(JS_PANEL_VISIBLE):
-                opened = True
-                break
+        opened, why = _open_sticker_panel(page, trace)
         if not opened:
-            events.emit(
-                "sticker",
-                "open_panel",
-                "failed",
-                friend=friend,
-                account=account,
-                attempt=aid,
-                error_class="panel_not_open",
-            )
-            return False, "表情面板未打开"
-
-        try:
-            page.wait_for_selector(
-                '[class*="emojiItem"]:not([class*="Desc"]), [class*="stickerItem"]',
-                state="visible",
-                timeout=perf.ms("panel_items_ms"),
-            )
-        except Exception:
-            events.emit(
-                "sticker",
-                "load_panel",
-                "failed",
-                friend=friend,
-                account=account,
-                attempt=aid,
-                error_class="panel_content_timeout",
-            )
-            return False, "表情面板内容未加载"
-
-        target = page.evaluate(JS_FIND_STICKER, sticker_name)
-        if "error" in target:
-            events.emit(
-                "sticker",
-                "find_item",
-                "failed",
-                friend=friend,
-                account=account,
-                attempt=aid,
-                error_class=target.get("error"),
-            )
-            if target.get("error") == "sticker_occluded":
-                at = target.get("at") or {}
-                return False, (
-                    f"表情项被遮挡, 点不到: ({at.get('x')},{at.get('y')}) 处是 "
-                    f"{at.get('tag', '')}.{at.get('cls', '')}"
-                )
-            return False, f"表情面板中未找到『{sticker_name}』"
-        log(f"[表情] 目标表情: ({target['x']},{target['y']})")
-        events.emit(
-            "sticker",
-            "find_item",
-            "ok",
-            friend=friend,
-            account=account,
-            attempt=aid,
-            extra={"x": target["x"], "y": target["y"]},
-        )
-
-        # 基线必须在**点击表情之前**取: 文案固定为「续火花」, 昨晚那条表情还挂在列表
-        # 尾部, 只比文本会把残留读成本次发送。
-        base = read_tail(page)
-        # 「找到就点」一次做完: 先 JS_FIND_STICKER 量坐标、再由 Python 派发点击,
-        # 中间面板还在做入场动画(或滚动吸附), 量到的矩形和真正点击那一刻差几十
-        # 像素就点空 —— 面板关了、一条新消息都没有(板端 6 次「表情面板已关闭但
-        # 无任何新增」全是这类)。_JS_CLICK_STICKER 内部就地派发, 失败才退回坐标。
-        clicked = page.evaluate(_JS_CLICK_STICKER, sticker_name)
-        if not (isinstance(clicked, dict) and clicked.get("ok")):
-            why = (clicked or {}).get("error") if isinstance(clicked, dict) else None
-            log(f"[表情] 元素内派发失败({why}), 退回坐标点击", level="WARN")
-            synthetic_click_at(page, target["x"], target["y"])
-        else:
-            log(f"[表情] 已在表情项上派发点击: ({clicked['x']},{clicked['y']})")
-        # 点击本身不是证据(没抛异常≠发出去了), verified 只能是 None
-        events.emit(
-            "sticker",
-            "click_item",
-            "ok",
-            friend=friend,
-            account=account,
-            attempt=aid,
-            verified=None,
-            extra={"x": target["x"], "y": target["y"], "n0": base[0]},
-        )
-
-        # 点击表情后抖音自动发送并关闭面板。确认信号(2026-10-07 审计后重排):
-        # 1) 有「新增气泡/尾部窗口移动」的硬证据 -> 明确成功(最强)
-        # 2) 面板关闭但证据读不到(列表容器定位失败) -> 沿用旧口径判成功, 标注「降级」
-        #    让 strat_stats 能统计这一层的失证比例, 不把它当成验证过
-        # 3) 面板关闭但证据可读且**毫无新增** -> 判未发送(表情点了个空)
-        # 注意: 表情发送成功后不要再走文字兜底, 避免重复发送。
-        closed_no_ev = None
-        for _ in range(6):
-            # 性能(2026-11-01): 首拍 250ms(气泡通常立刻出现), 之后维持 500ms。
-            page.wait_for_timeout(
-                perf.ms("tail_first_ms") if _ == 0 else perf.ms("tail_poll_ms")
-            )
-            n1, last, prev = read_tail(page)
-            ev, ev_msg = _evidence(base, n1, last, prev)
-            if ev is True:
-                if sticker_name in last or page.evaluate(JS_PANEL_CLOSED):
-                    events.emit(
-                        "sticker",
-                        "verify",
-                        "ok",
-                        friend=friend,
-                        account=account,
-                        attempt=aid,
-                        verified=True,
-                        extra={
-                            "ev": ev_msg,
-                            "bubble": n1,
-                            "text_match": sticker_name in last,
-                            "last_is_self": last_bubble_is_self(page),
-                        },
-                    )
-                    return True, f"表情已发送: {sticker_name} ({ev_msg})"
-                continue
-            if ev is None:
-                if sticker_name in last:
-                    events.emit(
-                        "sticker",
-                        "verify",
-                        "ok",
-                        friend=friend,
-                        account=account,
-                        attempt=aid,
-                        verified=None,
-                        extra={
-                            "degraded": ev_msg,
-                            "text_match": True,
-                            "last_is_self": last_bubble_is_self(page),
-                        },
-                    )
-                    return (
-                        True,
-                        f"表情已发送(降级 {ev_msg}): {sticker_name} (最新消息匹配 {last[:30]!r})",
-                    )
-                if page.evaluate(JS_PANEL_CLOSED):
-                    events.emit(
-                        "sticker",
-                        "verify",
-                        "ok",
-                        friend=friend,
-                        account=account,
-                        attempt=aid,
-                        verified=None,
-                        extra={"degraded": ev_msg},
-                    )
-                    return (
-                        True,
-                        f"表情已发送(降级 {ev_msg}): {sticker_name} (面板已关闭, 抖音自动发送)",
-                    )
-                continue
-            if page.evaluate(JS_PANEL_CLOSED):
-                # 不立即返回: 新气泡可能渲染滞后, 用满本轮窗口再下结论。
-                closed_no_ev = ev_msg
-        if closed_no_ev is not None:
-            # 证据可读且零新增 = 确证没发出去(表情点了个空)
-            events.emit(
-                "sticker",
-                "verify",
-                "failed",
-                friend=friend,
-                account=account,
-                attempt=aid,
-                verified=False,
-                extra={"ev": closed_no_ev},
-            )
-            return False, f"表情面板已关闭但{closed_no_ev}, 判未发送"
-        # 面板没关、窗口用尽: 分不清「没发出」与「发出但面板没关」→ unknown 更诚实
-        events.emit(
-            "sticker",
-            "verify",
-            "unknown",
-            friend=friend,
-            account=account,
-            attempt=aid,
-            verified=None,
-        )
-        return (
-            False,
-            f"表情面板未关闭, 发送可能失败 (最新消息 {read_tail(page)[1][:30]!r})",
-        )
+            return False, why
+        target, why = _pick_sticker(page, sticker_name, trace)
+        if target is None:
+            return False, why
+        return _await_sticker_result(page, sticker_name, target, trace)
     except Exception as exc:
-        events.emit(
-            "sticker",
-            "verify",
-            "failed",
-            friend=friend,
-            account=account,
-            attempt=aid,
-            error_class=type(exc).__name__,
-        )
+        _emit_sticker(trace, "verify", "failed", error_class=type(exc).__name__)
         return False, f"表情发送异常: {exc}"
 
 
