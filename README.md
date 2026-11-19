@@ -58,6 +58,7 @@ cp .env.example .env && chmod 600 .env         # 只有用密码登录才需要�
 | 今晚到底成没成 | `.venv/bin/python -m src.health_check` |
 | 这周有人断了吗 | `.venv/bin/python -m src.weekly_report` |
 | 本地开发（不碰正式账本） | `./run_dev.sh --dry-run`（自动补 `config.json` 占位） |
+| 提交前自检 | `./tools/verify.sh`（语法 + lint + 单测；`--fast` 只做前两项） |
 
 ## 配置速查
 

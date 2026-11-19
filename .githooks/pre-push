@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+# pre-push 钩子: 推送前跑一遍快速自检 (语法 + lint)，不跑单测以免拖慢推送。
+#
+# 这个仓库没有远端 CI (推送令牌没有 workflow 权限)，所以本地是唯一闸门。
+#
+# 注意: 钩子**不会**随 clone 自动生效，每个 clone 要手动开一次:
+#   git config core.hooksPath .githooks
+# 也可以绕过 (git push --no-verify)，所以它只是提醒，不是保证。
+set -uo pipefail
+cd "$(git rev-parse --show-toplevel)" || exit 0
+
+if [ -x tools/verify.sh ]; then
+  ./tools/verify.sh --fast || {
+    echo >&2
+    echo 'pre-push 自检未通过, 已拦下这次推送。' >&2
+    echo '确认要硬推: git push --no-verify' >&2
+    exit 1
+  }
+fi
+exit 0
