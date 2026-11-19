@@ -90,6 +90,7 @@ SPARK_HOST=USER@HOST ./tools/deploy.sh
    unit 里是 `Xvfb :99 -screen 0 800x600x24 -nolisten tcp`，与 `config.json` 的 `display: ":99"` 对应；改端口要两边一起改，`run_cron.sh` 的 `SPARK_DISPLAY` 也要跟着改。
 
    巡检的 `check_xvfb_display` 除了问 `systemctl is-active xvfb`，还会查 `/tmp/.X11-unix/X99` 这个 socket 在不在——只信 systemd 是不够的：unit 崩溃重启期间 systemd 照样报 `active`，而浏览器连上去就是一个连不上的显示。所以装完务必确认 `ls /tmp/.X11-unix/` 里有 `X99`。
+  显示号的取法与 `src/config.py` 一致：先读 `config.json` 的 `display`，留空就回落到环境里的 `DISPLAY`（回落来的显示号同样要查 socket，不是「免检」）；两者都没有时这一项返回 **skip（未核验）** 而不是 ok——不知道该查哪个 socket 的时候，`active` 只能证明某个 Xvfb 在跑。
 
 ## cron 行为
 

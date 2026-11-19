@@ -6,7 +6,7 @@
 
 > **免责声明**：本项目为个人自动化实践，与抖音官方无关。自动化操作可能触发平台风控，请自行评估风险并遵守平台协议；由此产生的任何后果由使用者自负。
 
-`Python 3.9+` · `Playwright (Chromium)` · `MIT` · `614 单元测试`
+`Python 3.9+` · `Playwright (Chromium)` · `MIT` · `623 单元测试`
 
 ---
 
@@ -45,7 +45,7 @@ cp .env.example .env && chmod 600 .env         # 只有用密码登录才需要�
 
 几句必须知道的话：
 
-- **浏览器必须是"有头"模式**（`headless: false` + Xvfb `:99`），否则抖音会拦、弱机还会渲染挂死。这条不是文档里的建议，而是**启动硬门禁**：`config.json` 里缺 `headless`、写成 `true`、或者 `display` 不是 `:N` 形式，`spark.py` 一律以退出码 5 拒绝启动（桌面临时调试要跑 headless 时设 `SPARK_ALLOW_HEADLESS=1`）。部署前先看 [部署文档](docs/deployment.md)。
+- **浏览器必须是"有头"模式**（`headless: false` + Xvfb `:99`），否则抖音会拦、弱机还会渲染挂死。这条不是文档里的建议，而是**启动硬门禁**：`config.json` 里缺 `headless`、写成 `true`、或者 `display` 写成了非 `:N` 形式（留空**是合法的**，含义是「用当前进程的 `DISPLAY`」；配置留空且环境里也没有可用 `DISPLAY` 时才拒），`spark.py` 一律以退出码 5 拒绝启动（桌面临时调试要跑 headless 时设 `SPARK_ALLOW_HEADLESS=1`）。部署前先看 [部署文档](docs/deployment.md)。
 - **`.env` 不是必需的**：只有走 `login.py --password`（密码登录）才要往里填账号密码。用 `--manual` 扫码登录的话，`.env` 留空就行。**`.env` / `config.json` / `runtime/` 都不要提交**，已经在 `.gitignore` 里。
 - **登录态在 `runtime/storage.json`**。它单独传、别进仓库 —— 把它跟代码一起同步过去这件事做漏了，部署机会去扫码登录而无人值守下没人做，当晚就是静默零发送。细节见部署文档「三类东西分开走」。
 - **登录用的是你这台机器当前的 X 显示，跟 `config.json` 的 `display` 没关系**。那条 `:99` 只给 `spark.py` 用（`src/session.py` 把它注入 `DISPLAY`）；`login.py` 读的是当前 shell 的 `DISPLAY`。所以登录前先确认：
@@ -83,7 +83,7 @@ cp .env.example .env && chmod 600 .env         # 只有用密码登录才需要�
 | `send_window` | `23:30`–`00:30` | 允许自动开始的时间窗（本地时），只约束开始时刻 |
 | `accounts` | 1 个 `main` | 多账号：每项含 `name` / `storage_file` / `state_file`，可加 `account` / `password` |
 | `headless` | `false` | **必须为 false**（抖音会拦无头；弱机无头渲染容易挂死） |
-| `display` | `:99` | Xvfb 虚拟显示编号 |
+| `display` | `:99` | Xvfb 虚拟显示编号。也可以留空，表示「用当前进程的 `DISPLAY`」（桌面临时调试常用 `:0`） |
 | `perf_profile` | `low` | `low`=低配机 / `mid`=普通笔记本 / `high`=高性能机（不确定就留 `low`） |
 | `notify_cmd` | `""` | 失败告警命令，`HEALTH_FAIL_MSG` 环境变量带原因 |
 

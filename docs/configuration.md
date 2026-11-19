@@ -10,7 +10,7 @@
 | `accounts` | 1 个 `main` | 多账号：每项含 `name` / `storage_file` / `state_file`，可加 `account` / `password`。**不能为空**：`src/config.py::preflight()` 会拦下空列表、非对象条目、缺 `name` 的条目，退出码 5（见 [operations.md](operations.md) 的退出码一节） |
 | `auto_login` | `true` | 登录态失效时用 `accounts` 里的账号密码重登（**凭据来自 config.json，不是 .env**） |
 | `headless` | `false` | **必须为 false**。抖音会拦无头；弱机无头渲染容易挂死 |
-| `display` | `:99` | Xvfb 虚拟显示编号。**只给 `spark.py` 用**（`src/session.py` 启动浏览器时把它注入 `DISPLAY`）；人工登录 `login.py` 读的是当前 shell 的 `DISPLAY`，见 README「登录用的是当前 X 显示」 |
+| `display` | `:99` | Xvfb 虚拟显示编号。留空合法，含义是「用当前进程的 `DISPLAY`」（配置留空、环境也没有合法 `DISPLAY` 才算错）。**只给 `spark.py` 用**（`src/session.py` 启动浏览器时把它注入 `DISPLAY`）；人工登录 `login.py` 读的是当前 shell 的 `DISPLAY`，见 README「登录用的是当前 X 显示」 |
 | `perf_profile` | `low` | `low`=低配机 / `mid`=普通笔记本 / `high`=高性能机（决定浏览器参数与全套等待上限） |
 | `browser_reuse` | `true` | 多好友共享一个浏览器实例 |
 | `browser_recycle_mem_mb` | `300` | 复用模式下，`MemAvailable` 低于该值就回收浏览器实例 |

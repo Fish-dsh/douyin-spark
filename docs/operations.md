@@ -8,6 +8,7 @@
 - **置顶好友不受状态检测限制**：无论检测为已续/未续一律强制发送，避免重要联系人因误判断火花。
 - `engine` / `friends` 两个字段**已废弃**，代码不读取。
 - `headless` 必须 `false` + `display: ":99"`（Xvfb 有头），`health_check.check_headed_config` 会断言。
+- `display` 留空**不是**错误写法：含义是「用当前进程的 `DISPLAY`」（`run_cron.sh` 已 `export DISPLAY=:99`）。巡检的 `check_xvfb_display` 走同一套回落顺序（配置 → 环境），两边都拿不到时记 **skip（未核验）** 而不是 ok —— `systemctl is-active` 只证明「某个 Xvfb 在跑」，证明不了浏览器会用上它。
 
 ## 性能档位与传参（2026-11-01）
 
