@@ -21,6 +21,7 @@
 | `BOARD_IP` | 跑生产的板子内网地址 |
 | `ROUTER_IP` | 路由器管理地址 |
 | `ACCOUNT_B` / `ACCOUNT_C` / `TEST_PHONE` | 登录用的手机号 |
-| `FRIEND_A` … `FRIEND_L` | 好友昵称 |
+| `FRIEND_A` … `FRIEND_M` | 好友昵称 |
+| `BOARD_SUBNET` | 板子所在网段 |
 
 脱敏是脚本一次性替换的，语义没动，所以那些"某人一直发不出去""某人的面板打不开"的因果链仍然是完整的。
