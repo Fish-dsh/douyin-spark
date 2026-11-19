@@ -742,7 +742,7 @@ class TestSendButtonSelectors(unittest.TestCase):
 
 
 class TestLastBubbleIsSelf(unittest.TestCase):
-    """2026-11-01 会话50: 表情层判据「最后一条文本含表情名」分不清是谁发的 ——
+    """2026-11-01: 表情层判据「最后一条文本含表情名」分不清是谁发的 ——
     续火花是双方互发同一个表情, 好友回一个同款也会命中。这里只测旁证函数本身,
     判定逻辑不变(今晚不改发送行为)。
     """

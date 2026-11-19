@@ -80,7 +80,7 @@ def _heartbeat_filename() -> str:
 _HEARTBEAT_FILE = RUNTIME_DIR / _heartbeat_filename()
 
 
-# 心跳的"身份"字段(2026-11-01 会话50, 外部评审两轮之后): 只有 stage/账号/时间时,
+# 心跳的"身份"字段(2026-11-01, 外部评审两轮之后): 只有 stage/账号/时间时,
 # 上一轮留下的心跳与这一轮完全无法区分 —— 任何读者都会把旧心跳当成"新任务还活着"。
 # task_id 由 run() 启动时生成, 心跳与 events 模块共用同一个值; seq 在同一轮内递增,
 # 用来判断"心跳在新, 但一步没往前走"(卡死) 与 "心跳根本没更新"(没跑) 是两回事。
@@ -1308,7 +1308,7 @@ def run() -> None:
                     f"【账号 {account.get('name', idx)} 未配置 account/password 且无登录态, 跳过】"
                 )
         log(f"[timing] 本次运行总耗时 {_fmt_duration(time.monotonic() - _t0_run)}")
-        # 任务收尾事件(2026-11-01 会话50): 记下可用内存最低值——以前没人记,
+        # 任务收尾事件(2026-11-01): 记下可用内存最低值——以前没人记,
         # 周报只能写"内存未采集"。available_mb() 读不到时返回 None, 事件里如实留空。
         _mem = available_mb()
         events.emit(
