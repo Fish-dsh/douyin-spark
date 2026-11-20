@@ -95,16 +95,17 @@ sudo apt install -y xvfb                                                 # 3. Xv
 spark.py             入口：参数 → 时间窗校验 → src.scheduler.run()
 run_cron.sh          cron 包装：Xvfb 检查、超时兜底、退出码转告警
 src/scheduler.py     唯一的编排者：发现 → 逐个好友 → 表情 → 文字 → 视觉兜底
+src/runtime_lock.py  PID 锁：跨进程互斥，拿不到就退 4
 src/discovery.py     扫聊天列表，挑出「有火花且今天没动静」的人
 src/spark_status.py  火花天数识别：CSS 类名 → 文本特征 → 火焰图标 → 结构兜底
 src/sender.py        发送与确认：表情面板、文字、几何点击、新增气泡判定
 src/self_heal.py     错误分类 → 恢复动作 → 告警
 src/health_check.py  次日巡检（CLI，也是告警出口）
 tools/               诊断脚本：策略直方图、任务看门狗、协议嗅探金丝雀
-tests/               全量 `pytest -q` 约 8 秒，不开浏览器、不碰真账号
+tests/               全量 `pytest -q`，不开浏览器、不碰真账号（耗时看末行）
 ```
 
-依赖是单向的：`logutil` / `src.config` / `src.perf` 是底座，`src.scheduler` 只往下调，兄弟模块之间互不 import（27 个模块，零循环依赖）。
+依赖是单向的：`logutil` / `src.config` / `src.perf` 是底座，`src.scheduler` 只往下调，兄弟模块之间互不 import（22 个模块，零循环依赖）。
 
 ## 文档
 
@@ -123,9 +124,7 @@ README 只放主干，细节都在 `docs/`：
 
 ## 参与
 
-代码由 **Fish-dsh** 维护，另有 **Little Code Sauce**（DSH 上的编码代理，跑 DeepSeek）参与：2026-11 的三轮审计与重构——`send_sticker` / `process_friend` 的拆分、PID 锁抽成 `src/runtime_lock.py`、周报跨午夜窗口的修复、文档与实现对账、JS 语法门禁的断言跟进。
-
-提交里署的是 `Co-authored-by: Little Code Sauce <little-code-sauce@users.noreply.github.com>`。这个邮箱没有对应的 GitHub 账号，所以右侧 Contributors 只统计到 Fish-dsh 一个人；但 `git log` 里每一笔都能看出是谁动的手。
+代码由 **Fish-dsh** 维护，**Little Code Sauce**（DeepSeek 驱动的 DSH 编码代理）参与 2026-11 的审计与重构。
 
 ## 许可证
 
