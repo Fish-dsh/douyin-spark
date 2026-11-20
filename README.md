@@ -126,6 +126,8 @@ README 只放主干，细节都在 `docs/`：
 
 代码由 **Fish-dsh** 维护，**Little Code Sauce**（DeepSeek 驱动的 DSH 编码代理）参与 2026-11 的审计与重构。
 
+[![](https://img.shields.io/badge/powered_by-dsh-4D6BFE?style=flat-square&logo=deepseek&logoColor=white)](https://github.com/deepseek-ai/deepseek-harness)
+
 ## 许可证
 
 [MIT](LICENSE)。欢迎 fork 自用；如果你把它跑在更差的硬件上还成功了，那挺厉害的。
