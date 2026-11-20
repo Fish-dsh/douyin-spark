@@ -1613,11 +1613,18 @@ class TestPidLockExemption(unittest.TestCase):
             # 不显式指路就会把日志写进**生产** runtime/spark.log —— 单测伪造的
             # 「另一实例运行中/完成: …」足以顶掉真实告警(2026-10-04 事故)。
             "SPARK_LOG_FILE": str(proj / "runtime" / "child.test.log"),
+            # 子进程要打中文日志。Windows 上父进程按 locale(cp936)解码 utf-8 字节会抛
+            # UnicodeDecodeError, 结果 proc.stdout 变成 None —— 测试报的是
+            # "'NoneType' object has no attribute 'splitlines'", 与真实缺陷无关。
+            # 两头都钉死 utf-8: 子进程按 utf-8 编码写, 父进程按 utf-8 解码读。
+            "PYTHONIOENCODING": "utf-8",
         }
         proc = subprocess.run(
             [sys.executable, "-c", self.CHILD_SNIPPET, self._fake_file(proj)],
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=120,
             cwd=str(root),
             env=env,
