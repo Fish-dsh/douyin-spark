@@ -20,6 +20,16 @@
 
 ## 会话时间线
 
+- **2026-11-20 · 会话 62（自检入口跨平台化 + 三份文档口径归一 + 补三个无测模块）**：
+① 起点=用户「随便你 还可以再跑两轮循环」。上两轮已经把真 bug 修完，这轮只做「不倒退的前提下更好用」，所以挑了三条同源的问题：自检入口只有 bash、文档口径三份不一致、四个模块一行测试都没有。
+② **自检入口是这次最值钱的一条**。`tools/verify.sh` 原本是 105 行 bash 真逻辑（compileall → node --check → ruff → pytest，缺工具记 SKIP，退出码 0/1/2），而仓库是「Windows 上开发、Linux 上跑」——于是开发机上根本没有可用的自检入口，只能手敲四条命令。做法不是写一个 `verify.ps1` 平行实现（那就是第三份必然漂移的逻辑），而是把逻辑搬进 `tools/verify.py`，`.sh` 缩成 26 行 shim 只做「挑解释器 + exec 转发」。解释器优先级 `--python` > `PY` > `.venv/bin/python` 或 `.venv\Scripts\python.exe` > `sys.executable`；退出码契约原样保留（2 = 缺工具没验证到，`--fast` 主动跳过不计入）。实测两侧都跑通：`python tools/verify.py` RC=0，`bash tools/verify.sh --fast` RC=2（WSL 里没装 ruff，正好验证了 SKIP 分支）。
+③ **文档口径归一**。`docs/development.md` 与 `AGENTS.md` 一直教人跑 `unittest discover`，而实际和 README 都是 pytest；development.md 的「提交前自检」四步里也完全没提 `tools/verify.sh` 与 Makefile。改成：跑测试与自检统一指 `python tools/verify.py`，pytest/ruff/check_js 作为「只跑一项」的备选，Windows 命令补全。顺手把 `src/weekly_report.py` 与 `tests/test_weekly_report.py` 里「照 docs/development.md 跑 unittest discover 会冒出 3 个 ERROR」这句解释改掉——它引用的前提已经不存在了。`Makefile` 的 `.venv/bin/python` 换成 `PY ?=`，Windows 上 `make PY=.venv/Scripts/python.exe verify` 可用。README 开头「一台 Linux 机器」放宽成「一台机器（Linux cron / Windows 计划任务都行）」。
+④ **补三个模块的单测**。`src/recovery.py`（判定表，纯函数）、`src/debug.py`（截图落盘与轮转）、`src/stealth.py`（注入的六段补丁）此前都是 0 测试。recovery 的重点不是「能不能识别」，而是 **`_RULES` 的顺序就是优先级**：一段 OOM 日志里同时出现「内存不足」和「元素未找到」，顺序一反，资源压力就被判成选择器失效——前者该重启会话，后者该 reload 重试，处置完全相反。所以专门写了 `TestRulePriority` 四条顺序护栏，外加 `TestRealLogShapes` 把 worklog 事故条目里的原文串抄进去当回归样本。debug 那三条钉的是 2026-11-20 修过的真事故（截图必须落在 RUNTIME_DIR 下、轮转只留 20 张、unlink 失败不连坐）；stealth 钉的是六段补丁各自 try/catch（`count("catch (e) {}") == 6`）与 37445/37446 两个 WebGL 常量。
+⑤ **测试去重**。`tests/test_self_heal.py` 里原本有一整套 `TestClassify`/`TestPolicy`，与新建的 test_recovery.py 重复。把分类与策略表整段移到 test_recovery.py（那里能测得更细），test_self_heal.py 只留门面部分（开关 → 告警去重 → 告警失败不连坐），文件从 197 行降到 113 行。
+⑥ **给工具链本身加护栏**。新增 `tests/test_verify_tooling.py`：断言 `.sh` 里只剩 `exec "$PY" tools/verify.py "$@"` 且不再出现 compileall/ruff/pytest 字样（防止有人把逻辑又抄回去）、`verify.py` 保留 return 1/2 与「--fast 不计入 SKIP」、Makefile 用 `PY ?=`、三份文档都指向同一个入口且不再出现 `unittest discover`。这类「文档说 A、代码是 B」的漂移，靠人肉 review 抓不住，靠断言最便宜。
+⑦ **验证**：588 → **623 passed, 1 skipped**（+35：recovery 20、debug 8、stealth 7、verify_tooling 7，self_heal 减 8）；`ruff check` 全绿；`ruff format --check` 73 files already formatted；`python tools/verify.py` RC=0。
+⑧ 没做：`tools/verify.py` 的 `--fast` 分支只在 Windows 上实测过，Linux 侧靠 `.sh` shim 间接跑到；`Makefile` 的 `clean` 仍是 `find`/`rm`（POSIX only），没改——它不属于自检链路。
+
 - **2026-11-20 · 会话 61（让 ChatGPT review 上一轮改动：两条 P1 落地 + 揪出第四处绕过 SPARK_RUNTIME_DIR 的路径）**：
 ① 起点=用户「让ChatGPT给你review。」——把会话 60 的改动整体丢给 chatgpt.com 免费版，拿回两条 P1 与一堆「没问题」的确认；两条 P1 我都实测复现过才动手，没有照抄建议。
 ② **P1-1 超时只杀 python 不杀 chromium**（`run_cron.ps1`）：`Stop-Process -Id $proc.Id` 不递归，父进程死了浏览器还在吃内存，下一轮再开新实例。实测对照——`Stop-Process` 后 python 进程数 3→2（子进程存活），`taskkill /PID <pid> /T /F` 后 3→1（整棵树没了，killerExit=0）。改法：优先 `taskkill /T /F`，不在时才退回 `Stop-Process`。
