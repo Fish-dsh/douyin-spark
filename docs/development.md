@@ -2,19 +2,41 @@
 
 ## 环境
 
+Linux / macOS：
+
 ```bash
 python3 -m venv .venv
-.venv/bin/pip install -r requirements.txt
+.venv/bin/pip install -r requirements-dev.txt
 .venv/bin/playwright install chromium
 ```
 
-`requirements.txt` 里的版本是锁定的（playwright / ruff / opencv-python-headless）。`requirements.txt` 只放运行与测试必需的东西。
+Windows（PowerShell）：
 
-## 跑测试
+```powershell
+py -3 -m venv .venv
+.venv\Scripts\pip install -r requirements-dev.txt
+.venv\Scripts\playwright install chromium
+```
+
+`requirements-dev.txt` = 运行时依赖 + pytest + ruff；版本全部锁定。只想跑起来、不跑测试的人装 `requirements.txt` 就够。
+
+## 一条命令自检
 
 ```bash
-.venv/bin/python -m unittest discover -s tests -v
-.venv/bin/ruff check .
+python tools/verify.py          # 语法 -> JS 语法 -> lint -> 单测
+python tools/verify.py --fast   # 只做前三步（pre-push 用的就是这个）
+```
+
+两个平台都能跑（纯 Python，不依赖 bash 或 make）。退出码：**0 全过 / 1 有检查失败 / 2 没失败但有步骤因缺工具被跳过**——2 是"没验证到"，不是"通过"。缺 node / ruff / pytest 记跳过，不记失败，干净 clone 不会因此卡住。
+
+习惯 `./tools/verify.sh` 或 `make verify` 的照旧能用，它们只是转发到同一个脚本。
+
+单跑某一项：
+
+```bash
+python -m pytest tests -q        # 单测
+python -m ruff check .           # 静态检查
+python tools/check_js.py         # src/ 里三引号 JS 常量的语法（需要 node）
 ```
 
 多数用例用桩数据驱动选择器/DOM，不需要真浏览器；涉及 Playwright 的用例要先 `playwright install chromium`。
@@ -31,10 +53,9 @@ python3 -m venv .venv
 
 ## 提交前自检
 
-1. `python -m compileall -q src tests tools spark.py login.py logutil.py` 通过。
-2. `.venv/bin/python -m unittest discover -s tests` 全绿（涉及浏览器的用例允许在无浏览器环境下 skip）。
-3. `.venv/bin/ruff check .` 干净。
-4. 改了日志文案/退出码/配置字段的，同步改 `docs/` 里对应那篇（退出码在 `operations.md`，配置在 `configuration.md`）。
+1. `python tools/verify.py` 退出码 0（涉及浏览器的用例允许在无浏览器环境下 skip）。
+2. 改了日志文案 / 退出码 / 配置字段的，同步改 `docs/` 里对应那篇（退出码在 `operations.md`，配置在 `configuration.md`）。
+3. 一次提交只做一件事，提交信息说清"改了什么、为什么"。
 
 ## 几个容易踩的坑
 

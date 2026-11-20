@@ -28,7 +28,7 @@ douyin-spark/
 ├── config.example.json / config.dev.json / .env.example
 ├── src/                               # 全部业务逻辑（见 docs/architecture.md 的模块表）
 ├── tools/                             # 运维脚本，不参与发送主链路
-├── tests/                             # unittest 全量测试
+├── tests/                             # pytest 全量测试
 ├── docs/                              # architecture / configuration / deployment / operations / self-heal / development
 └── runtime/                           # 运行时生成物（gitignored）
 ```
@@ -38,19 +38,20 @@ douyin-spark/
 ## 常用命令
 
 ```bash
-python -m compileall -q src tests tools spark.py login.py logutil.py   # 语法自检（先跑这个）
-.venv/bin/python -m unittest discover -s tests -v                     # 全量测试
-.venv/bin/ruff check .                                                # 静态检查
-.venv/bin/python spark.py --dry-run                                   # 演练：只走定位链路，不真发
-./run_dev.sh --dry-run                                                # 本地开发（runtime-dev/，不碰正式账本）
-powershell -File run_cron.ps1                                         # Windows 侧手动跑一次定时入口
-.venv/bin/python -m src.health_check                                  # 巡检：今晚成没成
-.venv/bin/python -m src.weekly_report                                 # 周报（只读日志）
+python tools/verify.py            # 自检四步：语法 -> JS 语法 -> lint -> 单测（跨平台）
+python tools/verify.py --fast     # 同上但跳过单测（pre-push 用的就是这个）
+python -m pytest tests -q         # 只跑单测
+python -m ruff check .            # 只跑静态检查
+python spark.py --dry-run         # 演练：只走定位链路，不真发
+./run_dev.sh --dry-run            # 本地开发（runtime-dev/，不碰正式账本）
+powershell -File run_cron.ps1     # Windows 侧手动跑一次定时入口
+python -m src.health_check        # 巡检：今晚成没成
+python -m src.weekly_report       # 周报（只读日志）
 ```
 
 ## 改动约定
 
-- 改完先 `compileall`，再跑 `unittest`；涉及 DOM 选择的改动，说明清楚用哪条策略兜底。
+- 改完跑 `python tools/verify.py`（退出码 0 才算过；2 = 缺工具没验证到，不是通过）；涉及 DOM 选择的改动，说明清楚用哪条策略兜底。
 - 新增等待/超时不要写字面量，加到 `src/perf.py` 的 `_SPECS`，由 `perf_profile` 统管（可用 `SPARK_PERF_<KNOB>` 临时覆盖）。
 - 新增配置字段要同时改：`config.example.json`、`src/config.py`、`docs/configuration.md`；改运行时机还要改 `docs/operations.md` 的四方一致那节。
 - 日志用中文、面向"明天早上看日志的人"；机器读的内容一律进 `src/events.py` 的 JSONL，不要混进日志。

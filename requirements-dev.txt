@@ -1,4 +1,4 @@
-# 开发/CI 依赖。跑 lint(tools/verify.sh)与单测(pytest tests)才需要。
+# 开发依赖。跑 tools/verify.py(语法 / JS 语法 / lint / 单测)才需要。
 #
 # 生产机器不需要这些: 装了只是多占磁盘, 不影响运行。
 -r requirements.txt

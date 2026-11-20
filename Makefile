@@ -1,4 +1,7 @@
-# 常用动作的快捷入口。没有 make 也不影响: 直接跑 tools/verify.sh 等价。
+# 常用动作的快捷入口。没有 make 也不影响: 直接跑 python tools/verify.py 等价。
+# Windows 上用 `make PY=.venv/Scripts/python.exe ...` 指定解释器。
+PY ?= .venv/bin/python
+
 .PHONY: help verify verify-fast test lint js check-js clean
 
 help:
@@ -9,19 +12,19 @@ help:
 	@echo 'make js           只扫 JS 常量语法 (需要 node)'
 
 verify:
-	@./tools/verify.sh
+	@$(PY) tools/verify.py
 
 verify-fast:
-	@./tools/verify.sh --fast
+	@$(PY) tools/verify.py --fast
 
 test:
-	@.venv/bin/python -m pytest tests -q
+	@$(PY) -m pytest tests -q
 
 lint:
-	@.venv/bin/python -m ruff check .
+	@$(PY) -m ruff check .
 
 js check-js:
-	@.venv/bin/python tools/check_js.py
+	@$(PY) tools/check_js.py
 
 clean:
 	@find . -name __pycache__ -type d -prune -exec rm -rf {} + ; \

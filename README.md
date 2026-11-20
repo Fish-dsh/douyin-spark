@@ -1,6 +1,6 @@
 # douyin-spark · 抖音自动续火花
 
-一台 Linux 机器 + 一条定时任务，就能每天自动把该续的聊天火花续掉；跑完自己留账，失败自己喊人。
+一台机器 + 一条定时任务（Linux cron / Windows 计划任务都行），就能每天自动把该续的聊天火花续掉；跑完自己留账，失败自己喊人。
 
 不要服务器、不要常开电脑：低配小板、旧笔记本、便宜 VPS 都够用（作者最初就是拿一块 1.5G 内存的 ARM 小板长期跑的，所以对弱机很友好）。
 
@@ -76,11 +76,12 @@ copy config.example.json config.json
 
 | 想干什么 | 命令 |
 | -------- | ---- |
-| 演练（不真发） | `.venv/bin/python spark.py --dry-run` |
-| 立刻补发（无视时间窗） | `.venv/bin/python spark.py --force` |
-| 登录态失效后重新登录 | `.venv/bin/python login.py --manual` |
-| 今晚到底成没成 | `.venv/bin/python -m src.health_check` |
-| 这周有人断了吗 | `.venv/bin/python -m src.weekly_report` |
+| 演练（不真发） | `python spark.py --dry-run` |
+| 立刻补发（无视时间窗） | `python spark.py --force` |
+| 登录态失效后重新登录 | `python login.py --manual` |
+| 今晚到底成没成 | `python -m src.health_check` |
+| 这周有人断了吗 | `python -m src.weekly_report` |
+| 提交前自检 | `python tools/verify.py` |
 | 本地开发（不碰正式账本） | `./run_dev.sh --dry-run` |
 
 ## 配置速查
@@ -145,7 +146,7 @@ src/spark_status.py  火花天数识别：CSS 类名 → 文本特征 → 火焰
 src/sender.py        发送与确认：表情面板、文字、几何点击、新增气泡判定
 src/self_heal.py     错误分类 → 恢复动作 → 告警
 src/health_check.py  次日巡检（CLI，也是告警出口）
-tools/               诊断脚本：策略直方图、任务看门狗、协议嗅探金丝雀
+tools/               自检入口 verify.py + 诊断脚本：策略直方图、任务看门狗、协议嗅探金丝雀
 tests/               全量 `pytest -q`，不开浏览器、不碰真账号（耗时看末行）
 ```
 
