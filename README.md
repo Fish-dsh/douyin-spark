@@ -121,6 +121,12 @@ README 只放主干，细节都在 `docs/`：
 | Agent | [AGENTS.md](AGENTS.md) | 仓库地图、命令清单、改动约定（给 AI/自动化代理看的） |
 | 人 | [docs/notes/](docs/notes/README.md) | **研发实况笔记**：会话工作日志、小板开 GPU 的实测报告、每日交接单（已脱敏） |
 
+## 参与
+
+代码由 **Fish-dsh** 维护，另有 **Little Code Sauce**（DSH 上的编码代理，跑 DeepSeek）参与：2026-11 的三轮审计与重构——`send_sticker` / `process_friend` 的拆分、PID 锁抽成 `src/runtime_lock.py`、周报跨午夜窗口的修复、文档与实现对账、JS 语法门禁的断言跟进。
+
+提交里署的是 `Co-authored-by: Little Code Sauce <little-code-sauce@users.noreply.github.com>`。这个邮箱没有对应的 GitHub 账号，所以右侧 Contributors 只统计到 Fish-dsh 一个人；但 `git log` 里每一笔都能看出是谁动的手。
+
 ## 许可证
 
 [MIT](LICENSE)。欢迎 fork 自用；如果你把它跑在更差的硬件上还成功了，那挺厉害的。
