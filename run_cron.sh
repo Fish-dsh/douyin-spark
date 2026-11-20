@@ -55,10 +55,18 @@ for attempt in 1 2 3; do
     fi
     _tmo=90
     [ "$_left" -lt "$_tmo" ] && _tmo="$_left"
-    # 把硬截止时刻(今天 00:00 + 95 分钟)导给 spark.py: 补扫阶段据此判断「还有没有
-    # 余量再多开一人」—— 烧穿 timeout 会得到 rc=124 而 run_cron 对它直接退出不重试,
-    # 比「少补扫一个」更糟。跨午夜时 00:00 已过, date 自然给出今天零点。
-    export SPARK_DEADLINE_EPOCH=$(( $(date -d "$(date +%F) 00:00" +%s) + _HARD_STOP_MIN * 60 ))
+    # 把硬截止时刻(逻辑运行日的 00:00 + 95 分钟)导给 spark.py: 补扫阶段据此判断
+    # 「还有没有余量再多开一人」—— 烧穿 timeout 会得到 rc=124 而 run_cron 对它直接
+    # 退出不重试, 比「少补扫一个」更糟。
+    # 逻辑运行日 ≠ 今天: 窗口跨午夜(23:30-00:30), 23 点后手动补跑的那一次属于**明天**
+    # 那一晚。照「今天零点」算, 硬截止就成了 22 小时前的过去时刻, 补扫余量恒为负
+    # (2026-11-20 审查发现)。判据直接用 _now_min() 的负数语义, 不再另取一次墙上时钟。
+    if [ "$(_now_min)" -lt 0 ]; then
+        _day_zero=$(date -d "tomorrow 00:00" +%s)
+    else
+        _day_zero=$(date -d "today 00:00" +%s)
+    fi
+    export SPARK_DEADLINE_EPOCH=$(( _day_zero + _HARD_STOP_MIN * 60 ))
     if [ "$_tmo" -ne 90 ]; then
         echo "$(date '+%F %T') [run_cron] 第 ${attempt} 轮按硬截止收窄 timeout: ${_tmo}m(距 01:35 剩 ${_left} 分钟)" >> runtime/spark.log
     fi
