@@ -49,12 +49,27 @@ from datetime import datetime
 from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parent.parent
-STATE_FILE = BASE_DIR / "runtime" / "state.json"
-LOG_FILE = BASE_DIR / "runtime" / "spark.log"
-CONFIG_FILE = BASE_DIR / "config.json"
-FAIL_MARKER = BASE_DIR / "runtime" / ".health_failed"
-PID_FILE = BASE_DIR / "runtime" / ".spark.pid"
-HEARTBEAT_FILE = BASE_DIR / "runtime" / "heartbeat.json"
+
+
+def _env_path(name: str, default: Path) -> Path:
+    """路径类环境变量: 相对路径按项目根解析, 与 src/config.py 同口径。"""
+    raw = os.environ.get(name)
+    if not raw or not raw.strip():
+        return default
+    path = Path(raw.strip())
+    return path if path.is_absolute() else BASE_DIR / path
+
+
+# 与 src/config.py / logutil.py 共用 SPARK_CONFIG / SPARK_RUNTIME_DIR: 巡检跟随当前
+# 主任务那份 state/log/config, 否则「主任务在 runtime-dev 里跑, 巡检盯着 runtime/」
+# 会给出漂亮的假绿(2026-11-20 审查)。
+RUNTIME_DIR = _env_path("SPARK_RUNTIME_DIR", BASE_DIR / "runtime")
+STATE_FILE = RUNTIME_DIR / "state.json"
+LOG_FILE = RUNTIME_DIR / "spark.log"
+CONFIG_FILE = _env_path("SPARK_CONFIG", BASE_DIR / "config.json")
+FAIL_MARKER = RUNTIME_DIR / ".health_failed"
+PID_FILE = RUNTIME_DIR / ".spark.pid"
+HEARTBEAT_FILE = RUNTIME_DIR / "heartbeat.json"
 # 抽成模块常量仅为可测: 单测把根目录指到临时区即可验证"活锁/陈旧锁"判定
 _PROC_ROOT = Path("/proc")
 
@@ -74,14 +89,6 @@ _FAIL_NAME_RE = re.compile(r"【(.+?)】处理失败")
 #   明确跳过: 【账号 main 未配置 account/password 且无登录态, 跳过】
 _NO_PENDING_ACCOUNT_RE = re.compile(r"没有需要续火花的好友, 账号\s+(\S+)\s+结束")
 _SKIP_ACCOUNT_RE = re.compile(r"【账号\s+(.+?)\s+未配置 account/password")
-
-
-def _as_int(text: str) -> int:
-    """正则捕获组 → int; 捕获组是纯数字必然成功, 包 try 只为消除静态检查的无差别告警。"""
-    try:
-        return int(text)
-    except ValueError:
-        return 0
 
 
 def today() -> str:
@@ -160,8 +167,8 @@ def _today_outcomes(
             if m:
                 acct = _ACCOUNT_RE.search(ln)
                 stats[acct.group(1) if acct else ""] = (
-                    _as_int(m.group(1)),
-                    _as_int(m.group(2)),
+                    int(m.group(1)),
+                    int(m.group(2)),
                 )
                 continue
         m = _NO_PENDING_ACCOUNT_RE.search(ln)

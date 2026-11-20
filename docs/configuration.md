@@ -60,7 +60,6 @@
 
 改运行时机（`send_window`、cron 时刻）必须四方一致：`config.json` × `src/config.py` × crontab × 文档。历史上曾误用 UTC 导致窗口永远不命中、静默不发送（退出码 0、日志无异常），**勿再引入时区换算**。
 
-两个已知的不一致（2026-11-19 审计记录，暂不改代码，改前先想清楚）：
+已消除的不一致（2026-11-20）：`src/health_check.py` 现在跟随 `SPARK_CONFIG` / `SPARK_RUNTIME_DIR`，巡检看的就是当前主任务那份 state/log/config；`runtime-dev/` 里跑出来的东西不再被生产目录的巡检误判。
 
-1. **巡检不认 `SPARK_CONFIG` / `SPARK_RUNTIME_DIR`**：`src/health_check.py` 自己按 `Path(__file__).parent.parent / "runtime"` 定位状态与日志。也就是说开发目录（`runtime-dev/`）跑出来的东西，巡检看不到；上板后两者同路径，所以生产无感。
-2. **不是所有键都由 `src/config.py` 读**：`headless` / `display` / `auto_login` / `notify_cmd` / `vision_*` 由各自的消费方直接读 `cfg`，`config.py` 只负责补默认值与归一（`perf_profile`、`accounts[].*_file`）。加字段时两种路径都有人用，别假设「config.py 里搜不到 = 没人读」。
+仍需注意：**不是所有键都由 `src/config.py` 读**：`headless` / `display` / `auto_login` / `notify_cmd` / `vision_*` 由各自的消费方直接读 `cfg`，`config.py` 只负责补默认值与归一（`perf_profile`、`accounts[].*_file`）。加字段时两种路径都有人用，别假设「config.py 里搜不到 = 没人读」。巡检直接读配置文件的那几项（`headless` / `display` / `notify_cmd`）也走这条路径。

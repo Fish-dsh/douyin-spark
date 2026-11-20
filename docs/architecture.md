@@ -16,6 +16,7 @@ cron 00:00 ──► run_cron.sh ──► spark.py ──► src/scheduler.run(
                  │                └─ 7. 退出码：0 完成 / 1 异常 / 2 未登录 / 3 需冷启动重跑 / 4 撞锁
                  └─ 硬截止 01:35：距截止不足 20 分钟不再起新一轮，timeout 按剩余时间收窄
 cron 01:45 ──► src/health_check.py：日期 / 收尾 / 有头配置 / Xvfb 四项巡检
+              （跟随 SPARK_CONFIG / SPARK_RUNTIME_DIR，与当前主任务同一份状态）
 ```
 
 ## 为什么是这么设计的

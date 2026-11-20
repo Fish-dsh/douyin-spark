@@ -785,3 +785,22 @@ class TestRotatedLog(unittest.TestCase):
 
         self.assertFalse(ok)
         self.assertIn("无", msg)
+
+
+class TestPathEnv(unittest.TestCase):
+    def test_env_path_relative_to_base_dir(self):
+        self.assertEqual(
+            health_check._env_path("MISSING_VAR_FOR_HEALTH_CHECK", Path("/fallback")),
+            Path("/fallback"),
+        )
+        with patch.dict(os.environ, {"SPARK_RUNTIME_DIR": " runtime-dev "}):
+            self.assertEqual(
+                health_check._env_path("SPARK_RUNTIME_DIR", Path("/fallback")),
+                health_check.BASE_DIR / "runtime-dev",
+            )
+        absolute = Path("C:/opt/douyin-spark/config.prod.json")
+        with patch.dict(os.environ, {"SPARK_CONFIG": str(absolute)}):
+            self.assertEqual(
+                health_check._env_path("SPARK_CONFIG", Path("/fallback")),
+                absolute,
+            )

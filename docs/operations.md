@@ -61,7 +61,7 @@
 .venv/bin/python src/health_check.py --notify-only-on-change  # 状态翻转才提醒
 ```
 
-检查项：① `runtime/state.json` 的 `date` 等于今天（本地时）；② `runtime/spark.log` 含今天的日期，且 **`config.accounts` 里每个账号**都有当日收尾（`==== 账号 X 完成:`、`今日…没有需要续火花的好友, 账号 X 结束` 或明确的 `【账号 X … 跳过】`；跳过=该账号今日没续火花，同样判失败）；③ `config.json` 的 `headless` 必须是 `false` 且有 `display`（否则等于放弃 Xvfb 伪装）；④ 该 `display` 号上的 Xvfb 进程必须活着。任一不满足即失败：打印诊断到 stderr、执行 `notify_cmd`（若配置）、退出码 1。**2026-10-04 修正**：老口径只统计"出现过完成行"的账号，于是账号 A 正常收尾就足以让整轮判健康——账号 B 被 `timeout` 杀在半路、5 人漏发也毫无告警。**任务还在跑时不判定**：`runtime/.spark.pid` 指向活的 `spark.py` 时直接退出 0 且不改 `.health_failed`（判定过早=假告警；陈旧锁/PID 复用不算运行中）。
+检查项：① `runtime/state.json` 的 `date` 等于今天（本地时）；② `runtime/spark.log` 含今天的日期，且 **`config.accounts` 里每个账号**都有当日收尾（`==== 账号 X 完成:`、`今日…没有需要续火花的好友, 账号 X 结束` 或明确的 `【账号 X … 跳过】`；跳过=该账号今日没续火花，同样判失败）；③ `config.json` 的 `headless` 必须是 `false` 且有 `display`（否则等于放弃 Xvfb 伪装）；④ 该 `display` 号上的 Xvfb 进程必须活着。任一不满足即失败：打印诊断到 stderr、执行 `notify_cmd`（若配置）、退出码 1。**2026-10-04 修正**：老口径只统计"出现过完成行"的账号，于是账号 A 正常收尾就足以让整轮判健康——账号 B 被 `timeout` 杀在半路、5 人漏发也毫无告警。**任务还在跑时不判定**：`runtime/.spark.pid` 指向活的 `spark.py`，且 `runtime/heartbeat.json` 在 30 分钟内更新过，才退出 0 且不改 `.health_failed`（判定过早=假告警；进程活着但心跳陈旧按挂死处理，陈旧锁/PID 复用不算运行中）。巡检路径跟随 `SPARK_CONFIG` / `SPARK_RUNTIME_DIR`，开发账本不会被生产巡检误判。
 
 cron 建议（部署机，晚于 00:00 主任务）：
 
