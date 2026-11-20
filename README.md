@@ -129,7 +129,8 @@ schtasks /Create /TN douyin-spark-check /SC DAILY /ST 01:45 /TR ^
 - **页面改版会让选择器失效**：扫聊天列表靠四条策略（CSS 类名 → 文本特征 → 火焰图标 → 结构兜底），其中只有一条锚定混淆类名；改版通常先打掉前两条，靠后两条与视觉兜底救场。
 - **滑块/行为验证码不处理**：只伪装自动化特征，绝不碰验证码，撞到就退避等下一晚。
 - **不做协议逆向**：火花天数走 WebSocket 二进制 protobuf，硬啃是军备竞赛，本项目天花板是"把 UI 操作做稳"。
-- **Windows 只是能用，不是验证过的生产环境**：`run_cron.ps1` / `GlobalMemoryStatusEx` / `cmd /c` 告警这些分支在 Windows 上有单测、能跑通，但整套链路的生产验证仍在 Linux 板子上做。Windows 上没有 Xvfb，有头模式直接用桌面会话（`display` 留空）。
+- **Windows 只是能用，不是验证过的生产环境**：2026-11-20 在本机 Windows 上跑过 `spark.py --dry-run` 演练（浏览器真的起来、打开抖音聊天页、判未登录、按退出码 2 收场），但整套链路的生产验证仍在 Linux 板子上做。Windows 上没有 Xvfb，有头模式直接用桌面会话（`display` 留空）。
+- **没装 playwright 浏览器时**：`playwright install chromium` 只装 playwright 自带那份；本机已有 Chrome/Edge 的话，设 `PLAYWRIGHT_CHROMIUM_PATH` 指向 `chrome.exe` 也能跑。启动失败会打印期望路径与两条修法，不会只甩一段英文栈。
 
 ## 代码地图
 

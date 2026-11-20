@@ -63,3 +63,6 @@ python tools/check_js.py         # src/ 里三引号 JS 常量的语法（需要
 - **`headless` 必须是 `false`**：写成 true 的提交等于把整个项目废掉，`health_check` 会直接 FAIL。
 - **别在 crontab 里写 `$(( RANDOM % 600 ))`**：Debian cron 会把未转义的 `%` 当换行。抖动逻辑放 `spark.py` 里。
 - **改超时/时间预算要成对看**：`run_cron.sh` 的 `timeout 90m` 与硬截止 01:35、巡检 01:45 是一组，动一个必须回头看另外两个。
+- **别在窗口外直接 `spark.py --dry-run` 等它跑**：起始抖动上限 30 分钟（`_START_JITTER_MAX`），演练要加 `--no-jitter`，否则就是盲等。
+- **本机没装 playwright 浏览器不一定要装**：设 `PLAYWRIGHT_CHROMIUM_PATH` 指向已有的 `chrome.exe` 即可，`src/login.py` 优先认这个环境变量。
+- **演练会把 `.spark.pid` 落在 `runtime/`**：PID 锁路径是硬拼项目根的（`runtime_lock.lock_path()`），不跟 `SPARK_RUNTIME_DIR`。跑完 `runtime/.spark.pid` 残留属正常，下一轮会按"cmdline 不是 spark.py → 视为陈旧锁接管"自己收掉。

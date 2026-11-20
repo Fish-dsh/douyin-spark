@@ -20,6 +20,15 @@
 
 ## 会话时间线
 
+- **2026-11-20 · 会话 63（Windows 本机演练一次，修掉演练暴露的三处提示）**：
+① 起点=用户「你试一下本地的Windows环境能不能启动？我的意思是，演练一次」。前几轮给 Windows 补了 run_cron.ps1 与三处平台分支，但一次都没在真机上跑过——单测绿不等于能起来。
+② **怎么跑起来的**：仓库里没有 config.json / .venv / runtime-dev，playwright 自带的 chromium 也没装（`%LOCALAPPDATA%\ms-playwright` 目录不存在，`p.chromium.launch` 报 `Executable doesn't exist at ...`）。靠 `PLAYWRIGHT_CHROMIUM_PATH` 指到本机已有的 `C:\Program Files\Google\Chrome\Application\chrome.exe` 才启动成功——`src/login.py:_resolve_chromium()` 优先认这个变量，且 Windows 上 `os.access(..., os.X_OK)` 对 exe 返回 True，这条路才成立。另造了一份 `runtime-dev/drill-config.json`（独立配置，不碰 config.json）与假 storage 放行登录态判定。
+③ **成功证据（这一步才有意义）**：`[mem:launch] 13646/32278 MB available`（Win32 内存读数生效）、`[state] 已从 storage_drill.json 恢复登录态`、`[detect] url=https://www.douyin.com/chat | logged_path=True`、`[debug] 截图已保存: runtime-dev\heal_screenshots\...png`（runtime 路径修复生效）、最后 `RC=2`。即浏览器真起来、真打开抖音聊天页、真读 DOM、真判未登录、真截图、真按退出码收场。
+④ **演练暴露的三处提示问题**（都不是逻辑错，是「第一次上手看不懂」）：P1 `launch_browser` 失败只抛一段英文栈 → 包 try/except 打印 `p.chromium.executable_path`（playwright 期望的路径，跟 `_CHROMIUM_PATH` 不是一回事）+ 两条修法，**异常原样 raise**（上层靠它判 rc=1）；P2 未登录提示写死 `.venv/bin/python` → 抽 `_manual_login_cmd()` 按 `sys.platform` 给 `Scripts\python`；P3 缺配置提示写死 `cp config.example.json` → 抽 `_copy_hint()` 按平台给 `copy`。另记一条坑：窗口外演练必须加 `--no-jitter`，起始抖动上限 30 分钟（`_START_JITTER_MAX`），不加就是盲等。
+⑤ **测试**：`tests/test_session.py` 加 4 例——launch 抛异常时日志含「chromium 启动失败 / 期望路径 / install 命令 / PLAYWRIGHT_CHROMIUM_PATH」、失败后不调 `memory_report`（那行会让人误以为浏览器起来了）、`_manual_login_cmd()` 两平台取值。623 → **627 passed, 1 skipped**。
+⑥ **文档**：README 已知限制第 4 条由「只在 Linux 验证过」改成「2026-11-20 本机演练过、但生产验证仍在板子」，并新增第 5 条写清 playwright 浏览器缺失的两种修法；`docs/development.md` 坑段加三条（`--no-jitter`、`PLAYWRIGHT_CHROMIUM_PATH`、演练会在 `runtime/` 留 `.spark.pid`——PID 锁路径是硬拼项目根的，不跟 `SPARK_RUNTIME_DIR`）。
+⑦ **没做**：Windows 上没跑真发（演练只到「发现 + 判未登录」）；`run_cron.ps1` 仍未在真机跑过一整夜；`runtime-dev/` 的演练产物留在本机（`.gitignore` 已覆盖，不入库）。
+
 - **2026-11-20 · 会话 62（自检入口跨平台化 + 三份文档口径归一 + 补三个无测模块）**：
 ① 起点=用户「随便你 还可以再跑两轮循环」。上两轮已经把真 bug 修完，这轮只做「不倒退的前提下更好用」，所以挑了三条同源的问题：自检入口只有 bash、文档口径三份不一致、四个模块一行测试都没有。
 ② **自检入口是这次最值钱的一条**。`tools/verify.sh` 原本是 105 行 bash 真逻辑（compileall → node --check → ruff → pytest，缺工具记 SKIP，退出码 0/1/2），而仓库是「Windows 上开发、Linux 上跑」——于是开发机上根本没有可用的自检入口，只能手敲四条命令。做法不是写一个 `verify.ps1` 平行实现（那就是第三份必然漂移的逻辑），而是把逻辑搬进 `tools/verify.py`，`.sh` 缩成 26 行 shim 只做「挑解释器 + exec 转发」。解释器优先级 `--python` > `PY` > `.venv/bin/python` 或 `.venv\Scripts\python.exe` > `sys.executable`；退出码契约原样保留（2 = 缺工具没验证到，`--fast` 主动跳过不计入）。实测两侧都跑通：`python tools/verify.py` RC=0，`bash tools/verify.sh --fast` RC=2（WSL 里没装 ruff，正好验证了 SKIP 分支）。
