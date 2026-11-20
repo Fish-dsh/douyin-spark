@@ -159,7 +159,9 @@ class TestBuildReport(unittest.TestCase):
     def test_friend_beyond_grace_window(self):
         days = self._week_ok()
         fail_day = _d(10, 20)
-        days[fail_day] = weekly_report.Day(accounts={"main": (3, 1)}, failures=["好友B"])
+        days[fail_day] = weekly_report.Day(
+            accounts={"main": (3, 1)}, failures=["好友B"]
+        )
         report = weekly_report.build_report(TODAY, self.start, self.end, days)
         self.assertIn("超过约 7 天", report)
 

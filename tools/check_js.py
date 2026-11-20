@@ -92,7 +92,7 @@ def _const_str(node: ast.AST):
 
 def iter_js(root: pathlib.Path = ROOT, targets=None):
     """产出 (相对路径, 名字, 源码文本)。名字形如 _JS_XXX 或 evaluate@123。"""
-    for rel in (targets if targets is not None else discover(root)):
+    for rel in targets if targets is not None else discover(root):
         path = root / rel
         if not path.exists():
             continue
@@ -142,7 +142,10 @@ def check_all(root: pathlib.Path = ROOT, targets=None) -> list[str]:
             tmp = pathlib.Path(fh.name)
         try:
             proc = subprocess.run(
-                ["node", "--check", str(tmp)], capture_output=True, text=True, check=False
+                ["node", "--check", str(tmp)],
+                capture_output=True,
+                text=True,
+                check=False,
             )
             if proc.returncode != 0:
                 first = (proc.stderr or "").strip().splitlines()
@@ -160,8 +163,13 @@ def main() -> int:
     for line in failures:
         print("  [FAIL] " + line)
     print(
-        "扫描 " + str(len(targets)) + " 个文件, 检查 " + str(len(segments))
-        + " 段 JS, " + str(len(failures)) + " 段语法错误"
+        "扫描 "
+        + str(len(targets))
+        + " 个文件, 检查 "
+        + str(len(segments))
+        + " 段 JS, "
+        + str(len(failures))
+        + " 段语法错误"
     )
     return 1 if failures else 0
 
