@@ -66,7 +66,7 @@ py -3 -m venv .venv
 
 copy config.example.json config.json
 
-.venv\Scripts\python login.py --manual
+.venv\Scripts\python tools\import_browser_cookies.py --account main   # 或 login.py --manual 扫码
 .venv\Scripts\python spark.py --dry-run
 .venv\Scripts\python spark.py
 ```
