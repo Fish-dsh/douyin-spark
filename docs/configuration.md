@@ -10,7 +10,7 @@
 | `accounts` | **必填，无默认** | 多账号：每项含 `name` / `storage_file` / `state_file`，可加 `account` / `password`。缺这一项时整轮什么都不做（`src/config.py` 只告警不补 `main`） |
 | `auto_login` | `true` | 登录态失效时用 `accounts` 里的账号密码重登（**凭据来自 config.json，不是 .env**） |
 | `headless` | `false` | **必须为 false**。抖音会拦无头；弱机无头渲染容易挂死。漏写这个键时 `src/session.py::DEFAULT_HEADLESS` 也按 `false`（有头）处理——2026-11-19 审计把旧默认 `True` 改掉了，因为「漏写键 = 静默无头」只会在第二天巡检里才被发现 |
-| `display` | `:99` | Xvfb 虚拟显示编号 |
+| `display` | `:99` | Xvfb 虚拟显示编号。Windows 上直接用桌面会话，写 `null`（巡检会放行；Linux 上缺这个键仍然 FAIL） |
 | `perf_profile` | `low` | `low`=低配机 / `mid`=普通笔记本 / `high`=高性能机（决定浏览器参数与全套等待上限） |
 | `browser_reuse` | `true` | 多好友共享一个浏览器实例 |
 | `browser_recycle_mem_mb` | `300` | 复用模式下，`MemAvailable` 低于该值就回收浏览器实例 |
@@ -29,12 +29,13 @@
 | `SPARK_RUNTIME_DIR` | 指定运行时目录（日志/登录态/账本都落这里） |
 | `SPARK_PERF_PROFILE` | 覆盖 `perf_profile`（`run_cron.sh` 用它把档位钉死） |
 | `SPARK_PERF_<KNOB>` | 临时覆盖单个等待/超时参数，排查用 |
-| `SPARK_DEADLINE_EPOCH` | 硬截止时刻，由 `run_cron.sh` 注入，给补扫算余量 |
+| `SPARK_DEADLINE_EPOCH` | 硬截止时刻（逻辑运行日 00:00 + 95 分钟），由 `run_cron.sh` / `run_cron.ps1` 注入，给补扫算余量 |
 | `SPARK_SELF_HEAL` | `0` 关闭自愈 |
 | `SPARK_SKIP_PID_LOCK` | 跳过 PID 锁（主任务持锁时跑验证子进程专用；**别在线上开**） |
 | `SPARK_LOG_FILE` | 指定日志文件（`logutil.py`）；不设时落 `runtime/spark.log` |
 | `SPARK_DISPLAY` | `run_cron.sh` 用它在启动前注入 `DISPLAY`（默认 `:99`）；必须早于浏览器启动，事后改 `os.environ` 对已拉起的驱动无效 |
 | `SPARK_VISION` | 覆盖 `vision_provider` |
+| `PLAYWRIGHT_CHROMIUM_PATH` | 直接指定 chromium 可执行文件；不设时按平台搜 `ms-playwright`（Linux `chrome-linux*/chrome`，Windows `chrome-win/chrome.exe`） |
 
 调试开关（默认行为即生产行为，改它们只是在排查单点时用）：`SPARK_PANEL_WAIT_MS`（表情面板等待）、`SPARK_SEND_GAP`（好友间停顿，如 `"3,15"`）、`SPARK_REUSE_PAGE` / `SPARK_PAGE_REUSE_MAX`（页面复用开关与上限）、`SPARK_SKIP_RELOAD`（跳过会话列表刷新）、`SPARK_PERF_SEND_GAP_MS`（拟人化停顿，归 `perf.py` 管）。
 

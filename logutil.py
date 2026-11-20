@@ -76,9 +76,11 @@ def _rotate_if_needed():
                 _log_fh.close()
             old2 = LOG_FILE.with_suffix(".log.2")
             old1 = LOG_FILE.with_suffix(".log.1")
+            # os.replace 而不是 Path.rename: Windows 上 rename 的目标已存在会抛
+            # FileExistsError, 被外层 except OSError 吞掉 → 轮转静默失效、日志无限长。
             if old1.exists():
-                old1.rename(old2)
-            LOG_FILE.rename(old1)
+                os.replace(old1, old2)
+            os.replace(LOG_FILE, old1)
             _log_fh = None
     except OSError:
         pass

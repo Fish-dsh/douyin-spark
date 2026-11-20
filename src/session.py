@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import sys
 import time
 from urllib.parse import urlparse
 
@@ -154,8 +155,8 @@ def block_resources(page: Page) -> None:
     page.route("**/*", _route)
 
 
-def _read_meminfo() -> dict:
-    """读取 /proc/meminfo 为 {键: kB 值}; 读取失败抛异常。"""
+def _read_proc_meminfo() -> dict:
+    """读取 /proc/meminfo 为 {键: kB 值}; 读取失败抛异常(Linux 专用)。"""
     with open("/proc/meminfo", encoding="utf-8") as f:
         info = {}
         for line in f:
@@ -164,8 +165,46 @@ def _read_meminfo() -> dict:
     return info
 
 
+def _read_win_meminfo() -> dict:
+    """Windows: GlobalMemoryStatusEx, 键名与 /proc/meminfo 对齐(kB); 失败抛异常。
+
+    开发机是 Windows 时, 回收复用浏览器的判据(见 browser_recycle_mem_mb)不能因为
+    "没有 /proc" 就永久失效 —— 那等于把 1.5G 机器的内存闸门搬到桌面机上关掉。
+    """
+    import ctypes
+
+    class _MemoryStatusEx(ctypes.Structure):
+        _fields_ = [
+            ("dwLength", ctypes.c_ulong),
+            ("dwMemoryLoad", ctypes.c_ulong),
+            ("ullTotalPhys", ctypes.c_ulonglong),
+            ("ullAvailPhys", ctypes.c_ulonglong),
+            ("ullTotalPageFile", ctypes.c_ulonglong),
+            ("ullAvailPageFile", ctypes.c_ulonglong),
+            ("ullTotalVirtual", ctypes.c_ulonglong),
+            ("ullAvailVirtual", ctypes.c_ulonglong),
+            ("ullAvailExtendedVirtual", ctypes.c_ulonglong),
+        ]
+
+    status = _MemoryStatusEx()
+    status.dwLength = ctypes.sizeof(_MemoryStatusEx)
+    if not ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):
+        raise OSError("GlobalMemoryStatusEx 调用失败")
+    return {
+        "MemTotal": status.ullTotalPhys // 1024,
+        "MemAvailable": status.ullAvailPhys // 1024,
+    }
+
+
+def _read_meminfo() -> dict:
+    """当前内存信息 {键: kB}; 按平台分流(Linux 读 /proc/meminfo, Windows 走 Win32 API)。"""
+    if sys.platform == "win32":
+        return _read_win_meminfo()
+    return _read_proc_meminfo()
+
+
 def available_mb() -> float | None:
-    """当前可用内存(MB, 取 /proc/meminfo 的 MemAvailable); 读不到返回 None。
+    """当前可用内存(MB, Linux 取 /proc/meminfo 的 MemAvailable, Windows 取 AvailPhys); 读不到返回 None。
 
     供调度器决定是否回收复用的浏览器实例(见 config.browser_recycle_mem_mb)。
     """

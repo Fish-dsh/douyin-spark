@@ -727,6 +727,77 @@ class TestRunInProgressGate(unittest.TestCase):
             mock_notify.assert_called_once()
 
 
+class TestHeadedConfigOnWindows(unittest.TestCase):
+    """Windows 有桌面会话, 有头不需要 Xvfb → display 留空不能判 FAIL。"""
+
+    def setUp(self):
+        self.tmpdir = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmpdir.name)
+        self.old = health_check.CONFIG_FILE
+        health_check.CONFIG_FILE = self.root / "config.json"
+
+    def tearDown(self):
+        health_check.CONFIG_FILE = self.old
+        self.tmpdir.cleanup()
+
+    def _write(self, payload: dict):
+        health_check.CONFIG_FILE.write_text(json.dumps(payload), encoding="utf-8")
+
+    def test_windows_without_display_is_ok(self):
+        self._write({"headless": False, "display": None})
+        with patch("src.health_check.sys.platform", "win32"):
+            ok, msg = health_check.check_headed_config()
+        self.assertTrue(ok, msg)
+
+    def test_windows_headless_true_still_fails(self):
+        self._write({"headless": True, "display": None})
+        with patch("src.health_check.sys.platform", "win32"):
+            ok, msg = health_check.check_headed_config()
+        self.assertFalse(ok)
+        self.assertIn("headless", msg)
+
+    def test_linux_without_display_fails(self):
+        self._write({"headless": False, "display": None})
+        with patch("src.health_check.sys.platform", "linux"):
+            ok, _ = health_check.check_headed_config()
+        self.assertFalse(ok)
+
+
+class TestPidAlive(unittest.TestCase):
+    """跨平台探活: 没有 /proc 的机器(Windows 开发机)也要能判断锁是否陈旧。"""
+
+    def test_non_positive_pid_is_dead(self):
+        self.assertFalse(health_check._pid_alive(0))
+        self.assertFalse(health_check._pid_alive(-1))
+
+    def test_proc_entry_means_alive_on_posix(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            (root / "4242").mkdir()
+            with patch.object(health_check, "_PROC_ROOT", root):
+                self.assertTrue(health_check._pid_alive(4242))
+                self.assertFalse(health_check._pid_alive(4243))
+
+    def test_windows_falls_back_to_win32_api_when_no_proc(self):
+        with (
+            tempfile.TemporaryDirectory() as td,
+            patch.object(health_check, "_PROC_ROOT", Path(td)),
+            patch("src.health_check.sys.platform", "win32"),
+            patch("src.health_check._win_pid_alive", return_value=True) as mock_win,
+        ):
+            self.assertTrue(health_check._pid_alive(4242))
+            mock_win.assert_called_once_with(4242)
+
+    def test_posix_without_proc_entry_does_not_call_win32_api(self):
+        with (
+            patch.object(health_check, "_PROC_ROOT", Path("/proc-nonexistent")),
+            patch("src.health_check.sys.platform", "linux"),
+            patch("src.health_check._win_pid_alive") as mock_win,
+        ):
+            self.assertFalse(health_check._pid_alive(4_000_000))
+            mock_win.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()
 

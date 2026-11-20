@@ -17,6 +17,7 @@ cron 00:00 ──► run_cron.sh ──► spark.py ──► src/scheduler.run(
                  └─ 硬截止 01:35：距截止不足 20 分钟不再起新一轮，timeout 按剩余时间收窄
 cron 01:45 ──► src/health_check.py：日期 / 收尾 / 有头配置 / Xvfb 四项巡检
               （跟随 SPARK_CONFIG / SPARK_RUNTIME_DIR，与当前主任务同一份状态）
+              （Windows 由计划任务调同名入口，Xvfb 项自动跳过）
 ```
 
 ## 为什么是这么设计的
@@ -34,7 +35,8 @@ cron 01:45 ──► src/health_check.py：日期 / 收尾 / 有头配置 / Xvfb
 | ---- | ---- |
 | `spark.py` | 入口：`python spark.py [--force|--dry-run]` |
 | `login.py` | 入口：`python login.py [--password|--manual]`（薄壳，实现在 `src/login.py`） |
-| `run_cron.sh` | 定时入口：cron 调它，重试 / 超时 / 硬截止都在这里 |
+| `run_cron.sh` | 定时入口（Linux）：cron 调它，重试 / 超时 / 硬截止都在这里 |
+| `run_cron.ps1` | 定时入口（Windows）：计划任务调它，判据与 `run_cron.sh` 一一对应 |
 | `run_dev.sh` | 开发入口：`config.dev.json` + `runtime-dev/`，不碰正式账本 |
 | `logutil.py` | 日志：控制台 + 持久文件句柄（轮转安全） |
 | `src/scheduler.py` | 主流程编排：窗口、逐账号、补扫、退出码 |
@@ -47,7 +49,7 @@ cron 01:45 ──► src/health_check.py：日期 / 收尾 / 有头配置 / Xvfb
 | `src/finder.py` | 选择器与渲染等待工具 |
 | `src/self_heal.py` | 自愈门面：错误分类 → 本地恢复策略 → 告警（零 API） |
 | `src/recovery.py` | 纯函数决策表（无依赖，便于单测） |
-| `src/health_check.py` | 每日巡检四件事：state 日期是不是今天、日志里每个账号有没有收尾、`headless`/`display` 配置断言、Xvfb 显示号是否活着 |
+| `src/health_check.py` | 每日巡检四件事：state 日期是不是今天、日志里每个账号有没有收尾、`headless`/`display` 配置断言、Xvfb 显示号是否活着（探活用 `_pid_alive`：POSIX 看 `/proc`，Windows 走 `OpenProcess`） |
 | `src/streak_history.py` | 火花历史覆盖门禁（近 3 天该出现的人今天是否还出现） |
 | `src/perf.py` | 三档性能参数表（浏览器参数 + 等待/超时项，可按机器强弱选） |
 | `src/events.py` | 结构化事件流（`runtime/events.jsonl`，与日志解耦） |

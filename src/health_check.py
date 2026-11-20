@@ -279,6 +279,40 @@ def check_log_has_today() -> tuple[bool, str]:
     return False, "spark.log 今日有记录但未见收尾(完成统计/无待续), 疑似中途失败"
 
 
+def _win_pid_alive(pid: int) -> bool:
+    """Windows 探活: OpenProcess(只查询权限) + GetExitCodeProcess == STILL_ACTIVE。"""
+    import ctypes
+
+    kernel32 = ctypes.windll.kernel32
+    handle = kernel32.OpenProcess(0x1000, False, pid)
+    if not handle:
+        return False
+    try:
+        code = ctypes.c_ulong()
+        if not kernel32.GetExitCodeProcess(handle, ctypes.byref(code)):
+            return False
+        return code.value == 259
+    finally:
+        kernel32.CloseHandle(handle)
+
+
+def _pid_alive(pid: int) -> bool:
+    """PID 是否存活(跨平台)。
+
+    与 src/runtime_lock.pid_alive 同义但**不复用**: 本文件要能当裸脚本跑
+    (cron 里就是 python src/health_check.py, 那时仓库根不在 sys.path)。
+    Windows 上绝不能写 os.kill(pid, 0) —— 那边它落到 TerminateProcess,
+    等于把要巡检的那个进程杀掉。
+    """
+    if pid <= 0:
+        return False
+    if (_PROC_ROOT / str(pid)).exists():
+        return True
+    if sys.platform == "win32":
+        return _win_pid_alive(pid)
+    return False
+
+
 def _live_run_pid() -> int | None:
     """主任务是否仍在运行 → 返回其 PID; 未运行(含陈旧锁)返回 None。
 
@@ -290,6 +324,8 @@ def _live_run_pid() -> int | None:
         pid = int(PID_FILE.read_text(encoding="utf-8").strip())
     except (OSError, ValueError):
         return None
+    if not _pid_alive(pid):
+        return None
     try:
         # 只认确实在跑 spark.py 的进程: PID 复用给无关进程时不能算"运行中"。
         # **必须是 `spark.py` 而不是 `spark`** —— 项目路径本身就是 /opt/douyin-spark，
@@ -300,7 +336,9 @@ def _live_run_pid() -> int | None:
             (_PROC_ROOT / str(pid) / "cmdline").read_bytes().decode("utf-8", "replace")
         )
     except OSError:
-        return None
+        # Windows 没有 /proc 可查 cmdline: 进程活着就认。那边只当开发机用,
+        # 宁可少一次自动判定, 也不要误报"今晚没跑完"。
+        return pid if sys.platform == "win32" else None
     return pid if "spark.py" in cmdline else None
 
 
@@ -381,8 +419,10 @@ def notify(fail_summary: str) -> bool:
         return False
     unproven = not _cmd_proves_delivery(cmd)
     env = {**os.environ, "HEALTH_FAIL_MSG": fail_summary}
+    # Windows 没有 sh(开发机上跑巡检会直接 FileNotFoundError), 换 cmd /c 执行同一条命令。
+    shell = ["cmd", "/c", cmd] if sys.platform == "win32" else ["sh", "-c", cmd]
     try:
-        proc = subprocess.run(["sh", "-c", cmd], env=env, timeout=60, check=False)
+        proc = subprocess.run(shell, env=env, timeout=60, check=False)
     except Exception as exc:
         print(f"[health] notify_cmd 执行失败: {exc}", file=sys.stderr)
         return False
@@ -421,7 +461,8 @@ def check_headed_config() -> tuple[bool, str]:
         return True, "config.json 非字典, 跳过有头模式配置检查"
     headless = cfg.get("headless")
     display = cfg.get("display")
-    if headless is False and display:
+    if headless is False and (display or sys.platform == "win32"):
+        # Windows 有桌面会话, 有头不需要 Xvfb, display 留空是对的; 板子上则必须有显示号。
         return True, f"有头模式配置正常 (display={display})"
     return (
         False,

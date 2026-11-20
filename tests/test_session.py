@@ -9,6 +9,7 @@ from src.session import (
     LAUNCH_ARGS,
     LoginRequiredError,
     _ensure_login,
+    _read_meminfo,
     available_mb,
     block_resources,
     close_session,
@@ -102,6 +103,11 @@ class TestBlockResources(unittest.TestCase):
 
 
 class TestMemoryReport(unittest.TestCase):
+    """内存读数按平台分流: 这里显式钉住 linux 分支(走 /proc), 否则在 Windows 上
+    跑测试会绕过 builtins.open 的 patch, 直接读真实内存(2026-11-20 首次跨平台跑
+    全量时就是这么红的)。Windows 分支见 TestReadMeminfoDispatch。"""
+
+    @patch("src.session.sys.platform", "linux")
     @patch("builtins.open")
     def test_reports_memory(self, mock_open):
         mock_open.return_value.__enter__.return_value = iter(
@@ -120,6 +126,7 @@ class TestMemoryReport(unittest.TestCase):
             self.assertIn("13192", call_args)  # 13509000 / 1024 ≈ 13192
             self.assertIn("15378", call_args)  # 15747000 / 1024 ≈ 15378
 
+    @patch("src.session.sys.platform", "linux")
     @patch("builtins.open", side_effect=OSError("no /proc/meminfo"))
     def test_handles_missing_meminfo(self, mock_open):
         with patch("src.session.log") as mock_log:
@@ -130,7 +137,30 @@ class TestMemoryReport(unittest.TestCase):
             self.assertIn("读取内存信息失败", call_args)
 
 
+class TestReadMeminfoDispatch(unittest.TestCase):
+    """_read_meminfo 的平台分流: Windows 走 Win32 API, 其余走 /proc。"""
+
+    def test_windows_uses_win32_api(self):
+        fake = {"MemTotal": 1000, "MemAvailable": 500}
+        with (
+            patch("src.session.sys.platform", "win32"),
+            patch("src.session._read_win_meminfo", return_value=fake) as win,
+        ):
+            self.assertEqual(_read_meminfo(), fake)
+        win.assert_called_once()
+
+    def test_linux_uses_proc(self):
+        fake = {"MemTotal": 1000, "MemAvailable": 500}
+        with (
+            patch("src.session.sys.platform", "linux"),
+            patch("src.session._read_proc_meminfo", return_value=fake) as proc,
+        ):
+            self.assertEqual(_read_meminfo(), fake)
+        proc.assert_called_once()
+
+
 class TestAvailableMb(unittest.TestCase):
+    @patch("src.session.sys.platform", "linux")
     @patch("builtins.open")
     def test_returns_memavailable_in_mb(self, mock_open):
         mock_open.return_value.__enter__.return_value = iter(
@@ -141,9 +171,18 @@ class TestAvailableMb(unittest.TestCase):
         )
         self.assertAlmostEqual(available_mb(), 13509000 / 1024)
 
+    @patch("src.session.sys.platform", "linux")
     @patch("builtins.open", side_effect=OSError("no /proc/meminfo"))
     def test_returns_none_when_unreadable(self, mock_open):
         self.assertIsNone(available_mb())
+
+    def test_returns_none_when_platform_api_fails(self):
+        """Win32 调用失败也必须是 None(而不是抛异常打断整晚)。"""
+        with (
+            patch("src.session.sys.platform", "win32"),
+            patch("src.session._read_win_meminfo", side_effect=OSError("boom")),
+        ):
+            self.assertIsNone(available_mb())
 
 
 class TestFreePageMemory(unittest.TestCase):

@@ -33,7 +33,9 @@
 
 想动性能相关代码之前先看 [板端性能笔记](docs/notes/board-perf.md)：哪几个等待是保命的、哪几条路已经试死、收益天花板在哪。
 
-## 快速开始（Linux）
+## 快速开始
+
+Linux：
 
 ```bash
 git clone <this-repo> douyin-spark && cd douyin-spark
@@ -52,7 +54,23 @@ cp config.example.json config.json             # 好友名单无需配置，扫�
 .venv/bin/python spark.py                      # 真发（窗口内）
 ```
 
-浏览器必须是"有头"模式（`headless: false` + Xvfb `:99`），否则抖音会拦截——这条是硬约束，部署前先看 [部署文档](docs/deployment.md)。
+Windows（PowerShell，命令把 `/` 换成 `\`、`.venv/bin/` 换成 `.venv\Scripts\`）：
+
+```powershell
+git clone <this-repo> douyin-spark; cd douyin-spark
+
+py -3 -m venv .venv
+.venv\Scripts\pip install -r requirements.txt
+.venv\Scripts\playwright install chromium
+
+copy config.example.json config.json
+
+.venv\Scripts\python login.py --manual
+.venv\Scripts\python spark.py --dry-run
+.venv\Scripts\python spark.py
+```
+
+浏览器必须是"有头"模式（`headless: false`），否则抖音会拦截——这条是硬约束。Linux 上靠 Xvfb 提供显示号（`display: ":99"`），Windows 直接用桌面会话，`display` 留空即可。部署前先看 [部署文档](docs/deployment.md)。
 
 ## 常用命令
 
@@ -80,7 +98,9 @@ cp config.example.json config.json             # 好友名单无需配置，扫�
 
 全部字段、环境变量、多账号与登录凭据规则见 [配置文档](docs/configuration.md)。
 
-## 部署（Linux + cron）
+## 部署
+
+Linux + cron：
 
 ```bash
 sudo rsync -a --exclude runtime --exclude .venv ./ /opt/douyin-spark/   # 1. 放代码（路径可在 run_cron.sh 改）
@@ -92,6 +112,15 @@ sudo apt install -y xvfb                                                 # 3. Xv
 #  45 1 * * *  cd /opt/douyin-spark && .venv/bin/python -m src.health_check
 ```
 
+Windows + 计划任务（`run_cron.ps1` 与 `run_cron.sh` 判据一一对应：同样的 90 分钟首轮、01:35 硬截止、退出码分流与重试矩阵）：
+
+```powershell
+schtasks /Create /TN douyin-spark /SC DAILY /ST 00:00 /TR ^
+  "powershell -NoProfile -ExecutionPolicy Bypass -File C:\douyin-spark\run_cron.ps1"
+schtasks /Create /TN douyin-spark-check /SC DAILY /ST 01:45 /TR ^
+  "powershell -NoProfile -ExecutionPolicy Bypass -Command ^"cd C:\douyin-spark; .venv\Scripts\python -m src.health_check --quiet --notify-only-on-change^""
+```
+
 细节（同步方式、低配机内存优化、Python 版本对齐）见 [部署文档](docs/deployment.md)。
 
 ## 已知限制
@@ -99,7 +128,7 @@ sudo apt install -y xvfb                                                 # 3. Xv
 - **页面改版会让选择器失效**：扫聊天列表靠四条策略（CSS 类名 → 文本特征 → 火焰图标 → 结构兜底），其中只有一条锚定混淆类名；改版通常先打掉前两条，靠后两条与视觉兜底救场。
 - **滑块/行为验证码不处理**：只伪装自动化特征，绝不碰验证码，撞到就退避等下一晚。
 - **不做协议逆向**：火花天数走 WebSocket 二进制 protobuf，硬啃是军备竞赛，本项目天花板是"把 UI 操作做稳"。
-- **只在 Linux 上验证过**：`run_cron.sh` / Xvfb 那套是 Linux 专有。
+- **Windows 只是能用，不是验证过的生产环境**：`run_cron.ps1` / `GlobalMemoryStatusEx` / `cmd /c` 告警这些分支在 Windows 上有单测、能跑通，但整套链路的生产验证仍在 Linux 板子上做。Windows 上没有 Xvfb，有头模式直接用桌面会话（`display` 留空）。
 
 ## 代码地图
 
@@ -107,7 +136,8 @@ sudo apt install -y xvfb                                                 # 3. Xv
 
 ```
 spark.py             入口：参数 → 时间窗校验 → src.scheduler.run()
-run_cron.sh          cron 包装：Xvfb 检查、超时兜底、退出码转告警
+run_cron.sh          cron 包装（Linux）：超时兜底、硬截止、退出码转重试
+run_cron.ps1         同一套判据的 Windows 版（计划任务入口）
 src/scheduler.py     唯一的编排者：发现 → 逐个好友 → 表情 → 文字 → 视觉兜底
 src/runtime_lock.py  PID 锁：跨进程互斥，拿不到就退 4
 src/discovery.py     扫聊天列表，挑出「有火花且今天没动静」的人

@@ -31,6 +31,25 @@ from .stealth import apply_stealth
 _CHROMIUM_PATH = None
 
 
+def _chromium_search_roots() -> list[str]:
+    """playwright 可能把 chromium 装到哪几个目录(按平台)。"""
+    home = Path.home()
+    if sys.platform == "win32":
+        local = os.environ.get("LOCALAPPDATA") or str(home / "AppData" / "Local")
+        return [
+            str(Path(local) / "ms-playwright"),
+            str(home / "AppData" / "Local" / "ms-playwright"),
+        ]
+    return [str(home / ".cache" / "ms-playwright"), "/home/BOARD/.cache/ms-playwright"]
+
+
+def _chromium_patterns() -> tuple[str, ...]:
+    """各平台 chromium 可执行文件在 ms-playwright 下的相对通配。"""
+    if sys.platform == "win32":
+        return ("chromium*/chrome-win/chrome.exe", "chromium*/chrome-win64/chrome.exe")
+    return ("chromium*/chrome-linux*/chrome", "chromium*/chrome-linux/chrome")
+
+
 def _resolve_chromium() -> str | None:
     """返回可用的 chromium 可执行文件路径, 无则 None(交 playwright 默认处理)。"""
     global _CHROMIUM_PATH
@@ -43,9 +62,10 @@ def _resolve_chromium() -> str | None:
     ):
         _CHROMIUM_PATH = env
         return env
-    for user in (str(Path.home()), "/home/BOARD"):
-        for pat in ("chromium*/chrome-linux*/chrome", "chromium*/chrome-linux/chrome"):
-            for hit in glob.glob(f"{user}/.cache/ms-playwright/{pat}"):
+    patterns = _chromium_patterns()
+    for root in _chromium_search_roots():
+        for pat in patterns:
+            for hit in glob.glob(f"{root}/{pat}"):
                 if os.path.isfile(hit) and os.access(hit, os.X_OK):
                     _CHROMIUM_PATH = hit
                     return hit

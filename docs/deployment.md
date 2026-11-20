@@ -37,7 +37,8 @@ cron 每天 00:00 调用包装脚本 `run_cron.sh`：
 # 脚本内容不在本文档复制(此前已与实际 run_cron.sh 漂移)，正源就是仓库根那份文件。
 # 它负责: cd 失败告警 / export DISPLAY=${SPARK_DISPLAY:-:99}(Xvfb 有头) /
 #         export SPARK_PERF_PROFILE=low(生产档位焊死, 见"性能档位") /
-#         export SPARK_DEADLINE_EPOCH(给 spark.py 算补扫余量的硬截止时刻) /
+#         export SPARK_DEADLINE_EPOCH(给 spark.py 算补扫余量的硬截止时刻;
+#           按逻辑运行日算 —— 23 点后手动补跑时取**明天** 00:00 + 95 分钟) /
 # timeout 90m 外圈兜底(防进程挂死长驻持 PID 锁; 45m → 90m 见下) / 退出码分流。
 ```
 
@@ -47,11 +48,39 @@ cron 每天 00:00 调用包装脚本 `run_cron.sh`：
 - **timeout 每轮都按剩余分钟收窄**（`run_cron.sh:56-57`）：`_tmo=90`，然后 `[ "$_left" -lt "$_tmo" ] && _tmo="$_left"`，即取 `min(90, 距 01:35 的剩余分钟)`，**没有额外的 -5 预留**。正常 00:00 起步的第一轮 `_left=95 > 90`，所以仍是完整 90m；只有已经烧过一轮、或夜里手动补跑的场合才会看到收窄（日志「按硬截止收窄 timeout」）。
 - **性能档位**：`run_cron.sh` 里 `export SPARK_PERF_PROFILE=low` 把生产档位焊死，不依赖 `config.json` 是否写了 `perf_profile`。**不要**在低配机上配 `mid` / `high` —— 瓶颈在抖音侧渲染而不是本机 CPU，高档位只是把超时改短、更快失败；`list_budget_ms`（150s）和 `login_state_deadline_ms`（45s）已三档统一，改档位省不到这两项。排查时先看 `runtime/spark.log` 里的 `[perf] perf_profile=...` 那一行；若出现 `[perf][warn]`，说明环境变量和 `config.json` 不一致（等待按环境变量、浏览器资源按 `config.json`）。
 - **硬截止 `_HARD_STOP_MIN=95`（01:35，2026-10-04 评审补上）**：90m 的额度只给"从 00:00 起的第一轮"。rc=3 冷启动重跑若发生在 00:16，一轮 90m 就到 01:46，**越过 01:45 的检查点** → health_check 撞上"主任务还在跑"直接退 0 → 整晚没人判定。所以：距 01:35 不足 20 分钟不再起新一轮（日志「不再起第 N 轮」），起得了的轮次 timeout 收窄到剩余分钟数（日志「按硬截止收窄 timeout」）。**被收窄的只是已经烧过一轮的晚上**，正常一晚不受影响——这条与"45m 砍死正常夜"是相反方向的教训，两者一起才把时间预算钉住。
+- **硬截止挂在「逻辑运行日」上，不是墙上今天**：`_now_min()` 把 23:30 记成 `-30`（窗口跨午夜），硬截止也必须跟着取**明天** 00:00 + 95 分钟；照「今天零点」算，23:30 手动补跑时截止时刻已是 22 小时前的过去值，`_budget_left_min()` 返回负数 → 补扫阶段恒放弃（2026-11-20 审查发现，`run_cron.sh` 与 `run_cron.ps1` 同型，两侧一起改）。
 - `spark.py` 自带 ±5 分钟抖动，无需在 cron 里额外 sleep。
 - 窗口（`send_window`）只约束**开始时刻**：启动时一次性判定是否在窗口内，发送循环不强制截止，实际可能发到窗口结束后一小段时间（允许晚发）。
 - **陷阱**：不要在 crontab 命令里写 `$(( RANDOM % 600 ))`。Debian cron 会把未转义的 `%` 当作换行符（须转义为 `\%`），导致整条命令语法错误、静默失败。shell 逻辑放进 wrapper 脚本即可绕开。
 - `> /dev/null 2>>runtime/spark.log`：`logutil` 已自行写 runtime/spark.log，stdout 再重定向进去会造成每行日志双写；stderr 保留以便捕获崩溃堆栈。
 - `spark.py` 自己判断窗口与已发送，非窗口期或今日已发完就静默退出。
+
+## Windows（计划任务）
+
+Windows 上没有 bash / `date -d` / `timeout`，仓库根多一份 `run_cron.ps1`：判据与 `run_cron.sh` **一一对应**（首轮 90 分钟、距 01:35 不足 20 分钟不再起新一轮、timeout 按剩余分钟收窄、退出码 0/1/2/3/4/124/130 分流、rc=1 重试一次、rc=3 最多 3 轮），差别只在实现手段：
+
+| | Linux | Windows |
+| --- | --- | --- |
+| 定时 | crontab | 计划任务（`schtasks`） |
+| 显示 | Xvfb `:99`（`display: ":99"`） | 桌面会话，`display` 留 `null` |
+| 超时兜底 | `timeout Nm` | `Start-Process` + `Wait-Process -Timeout`，超时 `Stop-Process` 并置 rc=124 |
+| 日志 | `>> runtime/spark.log` | `-RedirectStandardError runtime/.run_cron.err`，脚本自己往 `runtime/spark.log` 追加收尾行 |
+| 告警命令 | `sh -c "<notify_cmd>"` | `cmd /c "<notify_cmd>"` |
+| 内存读数 | `/proc/meminfo` 的 `MemAvailable` | `GlobalMemoryStatusEx` 的 `AvailPhys` |
+
+```powershell
+# 主任务：每天 00:00
+schtasks /Create /TN douyin-spark /SC DAILY /ST 00:00 /TR ^
+  "powershell -NoProfile -ExecutionPolicy Bypass -File C:\douyin-spark\run_cron.ps1"
+
+# 巡检：每天 01:45（与 Linux 的 45 1 * * * 同一时刻）
+schtasks /Create /TN douyin-spark-check /SC DAILY /ST 01:45 /TR ^
+  "powershell -NoProfile -ExecutionPolicy Bypass -Command ^"cd C:\douyin-spark; .venv\Scripts\python -m src.health_check --quiet --notify-only-on-change^""
+```
+
+计划任务的 `/ST` 只在机器醒着时触发，**默认不会唤醒睡眠中的机器**，也不会在错过后补跑；想稳一点就在「任务属性 → 条件」里勾「唤醒计算机运行此任务」，并给主任务加「如果错过计划开始时间，则尽快启动」（这与 Linux 侧「窗口只约束开始时刻」的宽容口径一致）。
+
+Windows 上 `display` 留空、Xvfb 巡检项自动跳过（`src/health_check.py::check_xvfb_display` 找不到 `systemctl` 就跳过）。**生产验证仍在 Linux 板子上做**：Windows 分支有单测、能跑通，但没有一整季的真机账单。
 
 ## 内存优化（1.5G 级低配机）
 
