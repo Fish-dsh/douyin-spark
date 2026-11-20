@@ -46,7 +46,8 @@ python3 -m venv .venv
 
 cp config.example.json config.json             # 好友名单无需配置，扫描自动发现
 
-# 生成登录态（二选一）
+# 生成登录态（三选一）
+.venv/bin/python tools/import_browser_cookies.py --account main   # 复用日常 Edge 里已登好的抖音
 .venv/bin/python login.py --manual             # 弹出浏览器，人工扫码/登录后保存
 .venv/bin/python login.py --password           # 用 .env 里的账号密码登录
 
@@ -79,10 +80,13 @@ copy config.example.json config.json
 | 演练（不真发） | `python spark.py --dry-run` |
 | 立刻补发（无视时间窗） | `python spark.py --force` |
 | 登录态失效后重新登录 | `python login.py --manual` |
+| 复用浏览器里已登好的抖音 | `python tools/import_browser_cookies.py --account main` |
 | 今晚到底成没成 | `python -m src.health_check` |
 | 这周有人断了吗 | `python -m src.weekly_report` |
 | 提交前自检 | `python tools/verify.py` |
 | 本地开发（不碰正式账本） | `./run_dev.sh --dry-run` |
+
+想省掉扫码：`import_browser_cookies.py` 会让你日常在用的 Edge/Chrome 临时加载一个只申请 `cookies` 权限的小扩展，把已登录会话导成 `runtime/storage_<账号>.json`——主链路照旧读这个文件，发送代码一行没改。要求那个浏览器先**完全退出**（后台残留进程会让新窗口把参数移交给老进程，扩展不加载）。
 
 ## 配置速查
 

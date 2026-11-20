@@ -97,6 +97,7 @@ cron 建议（部署机，晚于 00:00 主任务）：
 - **手动强制发送**：`python spark.py --force` 忽略发送窗口与今日幂等限制，立即尝试给所有需续好友发送（用于补发或测试）。
 - **发送链路验证**：`python spark.py --verify-send` 窗口内对**全部待续好友**（含置顶强制续）逐一真实发送并确认（会写 `state.json` 防重发，通过要求日志有「发送成功」正向证据）。
 - **重新登录**：登录态彻底失效时，重跑 `python login.py --password`（读 `login.py --password` 这条人工入口的 `.env`；无人值守路径的密码在 `config.json` 的 `accounts` 里），或 `python login.py --manual` 人工扫码。
+- **复用浏览器里已登好的会话**：`python tools/import_browser_cookies.py --account main`（`--browser chrome` 换浏览器，`--output` 换落点）。它用日常 Edge/Chrome 的 profile 临时加载一个只申请 `cookies` 权限的 MV3 扩展，由**浏览器自己**把明文 cookie 交给扩展再回传本地端口，因此不需要解 ABE 密文、不开调试端口、不复制 profile。产物就是 `runtime/storage_<账号>.json`，与 `login.py --manual` 写出的是同一种文件，主链路照旧 `restore_state` 读它。前置条件只有一条：那个浏览器必须**完全退出**（残留进程会让新窗口把参数移交给老进程，`--load-extension` 不生效，于是 90 秒内收不到回传）。
 
 ## 开发与自检
 

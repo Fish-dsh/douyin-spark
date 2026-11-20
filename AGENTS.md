@@ -27,7 +27,7 @@ douyin-spark/
 ├── run_dev.sh                         # 开发入口（runtime-dev/）
 ├── config.example.json / config.dev.json / .env.example
 ├── src/                               # 全部业务逻辑（见 docs/architecture.md 的模块表）
-├── tools/                             # 运维脚本，不参与发送主链路
+├── tools/                             # 运维脚本，不参与发送主链路（verify.py / import_browser_cookies.py / …）
 ├── tests/                             # pytest 全量测试
 ├── docs/                              # architecture / configuration / deployment / operations / self-heal / development
 └── runtime/                           # 运行时生成物（gitignored）

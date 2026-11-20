@@ -60,7 +60,7 @@ cron 01:45 ──► src/health_check.py：日期 / 收尾 / 有头配置 / Xvfb
 | `src/net_sniff.py` | 被动旁路嗅探，仅作"接口改版"的诊断金丝雀 |
 | `src/debug.py` | 调试截图与页面 dump |
 | `src/config.py` | 配置 / 状态 / 窗口判定 / 环境变量 |
-| `tools/` | 运维脚本（不参与发送主链路）：`verify.py` 自检、心跳看门狗、策略统计、网络观测 |
+| `tools/` | 运维脚本（不参与发送主链路）：`verify.py` 自检、`import_browser_cookies.py` 登录态导入、心跳看门狗、策略统计、网络观测 |
 | `tests/` | pytest 全量测试（纯桩数据，不开浏览器） |
 | `docs/` | 本目录：架构、配置、部署、运维、自愈、开发 |
 
