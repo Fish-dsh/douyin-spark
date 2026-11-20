@@ -265,7 +265,7 @@ class TestEmit(unittest.TestCase):
     """周报打印必须扛得住装不下的终端编码。
 
     Windows 控制台默认 GBK, ✅/⚠️ 会抛 UnicodeEncodeError 把整条命令打断
-    (照 docs/development.md 跑 unittest discover 会因此冒出 3 个 ERROR)。
+    (实测开发机上直接跑 python -m src.weekly_report 就会崩在打印环节)。
     周报是只读巡检产物, 少几个符号也比整条失败好。
     """
 

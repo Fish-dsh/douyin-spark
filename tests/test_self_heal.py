@@ -1,7 +1,7 @@
-"""self_heal / recovery 单测。
+"""self_heal 门面的单测: 开关 → 分类 → 策略 → 告警去重。
 
-覆盖降级后的两层: `recovery`(纯策略表) 与 `self_heal`(门面 + 告警去重)。
-运行: .venv/bin/python -m unittest discover -s tests -v
+分类表与策略表本身在 tests/test_recovery.py 里测(那里是纯函数, 覆盖面更全),
+这里只管门面: 读哪个开关、什么时候告警、告警失败会不会连坐。
 """
 
 from __future__ import annotations
@@ -11,91 +11,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from src import recovery, self_heal
-
-
-class TestClassify(unittest.TestCase):
-    """错误分类: 判定顺序即优先级, 越"具体"的越先命中。"""
-
-    def test_render_hang_first(self):
-        # 该串同时含 "超时"(transient) 与 "渲染挂死", 必须判为渲染挂死
-        self.assertEqual(
-            recovery.classify(
-                "process_friend", "会话列表超时且页面 body 全空(渲染挂死)"
-            ),
-            recovery.RENDER_HANG,
-        )
-
-    def test_selector_on_discovery(self):
-        self.assertEqual(
-            recovery.classify(
-                "discover", "火花检测四策略全部未命中, 疑似抖音页面改版导致选择器失效"
-            ),
-            recovery.SELECTOR,
-        )
-
-    def test_selector_on_coverage_gap(self):
-        self.assertEqual(
-            recovery.classify("discover", "发现覆盖缺失: 甲, 乙"), recovery.SELECTOR
-        )
-
-    def test_transient_timeout(self):
-        self.assertEqual(
-            recovery.classify("process_friend", "Page.goto: Timeout 30000ms exceeded"),
-            recovery.TRANSIENT,
-        )
-
-    def test_transient_target_closed(self):
-        self.assertEqual(
-            recovery.classify("process_friend", "Target closed"), recovery.TRANSIENT
-        )
-
-    def test_transient_unconfirmed_send(self):
-        # 静默失败(confirm_send 返回 fail 而非抛异常)必须值得重试
-        self.assertEqual(
-            recovery.classify("process_friend", "发送未确认: 好友A"), recovery.TRANSIENT
-        )
-
-    def test_resource_oom(self):
-        self.assertEqual(
-            recovery.classify("process_friend", "Out of memory"), recovery.RESOURCE
-        )
-
-    def test_login(self):
-        self.assertEqual(recovery.classify("process_friend", "未登录"), recovery.LOGIN)
-
-    def test_streak_gap_is_unknown(self):
-        # 漏发无法在本地恢复 → 未知类 → 告警, 不臆测重试
-        self.assertEqual(
-            recovery.classify("streak_gap", "昨日 3 个待续好友未发送(账号 main): 甲"),
-            recovery.UNKNOWN,
-        )
-
-    def test_unknown_default(self):
-        self.assertEqual(
-            recovery.classify("process_friend", "莫名其妙"), recovery.UNKNOWN
-        )
-
-
-class TestPolicy(unittest.TestCase):
-    def test_mapping(self):
-        self.assertEqual(recovery.policy(recovery.TRANSIENT), recovery.RETRY)
-        self.assertEqual(recovery.policy(recovery.SELECTOR), recovery.RELOAD_RETRY)
-        self.assertEqual(
-            recovery.policy(recovery.RENDER_HANG), recovery.RESTART_SESSION
-        )
-        self.assertEqual(recovery.policy(recovery.RESOURCE), recovery.RESTART_SESSION)
-        self.assertEqual(recovery.policy(recovery.LOGIN), recovery.ALERT)
-        self.assertEqual(recovery.policy(recovery.UNKNOWN), recovery.ALERT)
-
-    def test_unknown_category_alerts(self):
-        self.assertEqual(recovery.policy("不存在的类别"), recovery.ALERT)
-
-    def test_should_retry(self):
-        for action in (recovery.RETRY, recovery.RELOAD_RETRY, recovery.RESTART_SESSION):
-            self.assertTrue(recovery.should_retry(action), action)
-        for action in (recovery.SKIP, recovery.ALERT):
-            self.assertFalse(recovery.should_retry(action), action)
+from src import self_heal
 
 
 class TestSelfHealFacade(unittest.TestCase):

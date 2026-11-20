@@ -506,9 +506,9 @@ def _emit(text: str) -> None:
     """把周报写到 stdout, 遇到终端编码装不下的字符降级为 ? 而不是崩掉。
 
     Linux 生产是 UTF-8, 从来不会走到 except。开发机 Windows 控制台默认 GBK,
-    ✅/⚠️ 这类符号会抛 UnicodeEncodeError 直接打断整条周报命令(实测照
-    docs/development.md 跑 unittest discover 会因此冒出 3 个 ERROR, 与被测
-    逻辑无关)。周报是只读的巡检产物, 少几个符号也比整条命令失败好。
+    ✅/⚠️ 这类符号会抛 UnicodeEncodeError 直接打断整条周报命令(实测开发机上
+    直接 `python -m src.weekly_report` 会在打印环节崩, 与被测逻辑无关)。
+    周报是只读的巡检产物, 少几个符号也比整条命令失败好。
     """
     enc = (sys.stdout.encoding or "utf-8").lower()
     try:
