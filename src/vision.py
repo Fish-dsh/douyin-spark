@@ -43,10 +43,10 @@ from pathlib import Path
 from logutil import log
 
 from . import perf
-from .config import BASE_DIR
+from .config import CONFIG_FILE, RUNTIME_DIR
 
-# 视觉截图与原始页面截图分开放: 前者已脱敏, 便于事后复盘
-_SHOT_DIR = BASE_DIR / "runtime" / "vision_shots"
+# 视觉截图与原始页面截图分开放: 前者已脱敏, 便于事后复盘(路径跟着 SPARK_RUNTIME_DIR)
+_SHOT_DIR = RUNTIME_DIR / "vision_shots"
 _SHOT_KEEP = 20
 _MAX_IMAGE_BYTES = 6 * 1024 * 1024
 
@@ -196,7 +196,7 @@ _JS_ROWS_AT = """
 def _config() -> dict:
     """读 config.json(含机器私有配置, 不入 git); 读取/解析失败返回空 dict。"""
     try:
-        return json.loads((BASE_DIR / "config.json").read_text(encoding="utf-8"))
+        return json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
     except Exception:
         return {}
 

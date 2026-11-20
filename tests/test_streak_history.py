@@ -239,5 +239,26 @@ class TestCheckStreakHistory(unittest.TestCase):
         fn.assert_called_once()
 
 
+class TestHistoryFileFollowsRuntimeDir(unittest.TestCase):
+    """HISTORY_FILE 必须从 src/config.py 的 RUNTIME_DIR 派生(AGENTS.md 第 9 条)。
+
+    2026-11-20 审查发现: 这里曾自己拼 `Path(__file__).parent.parent / "runtime"`,
+    绕过 SPARK_RUNTIME_DIR —— run_dev.sh 声称的「不碰生产 runtime/」因此是假话,
+    开发时的火花历史写进生产目录, 还会污染 P5 覆盖对照的冷却判定。
+    """
+
+    def test_history_file_lives_under_config_runtime_dir(self):
+        from src.config import RUNTIME_DIR
+
+        self.assertEqual(
+            streak_history.HISTORY_FILE, RUNTIME_DIR / "streak_history.json"
+        )
+
+    def test_no_module_relative_runtime_path(self):
+        # 回潮守卫: 源码里不许再出现自己拼 runtime 的写法。
+        src = Path(streak_history.__file__).read_text(encoding="utf-8")
+        self.assertNotIn('"runtime" / "streak_history.json"', src)
+
+
 if __name__ == "__main__":
     unittest.main()

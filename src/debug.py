@@ -9,9 +9,11 @@ from playwright.sync_api import Page
 from logutil import log
 
 from . import perf
-from .config import BASE_DIR
+from .config import RUNTIME_DIR
 
-SCREENSHOT_DIR = BASE_DIR / "runtime" / "heal_screenshots"
+# 跟着 SPARK_RUNTIME_DIR 走(本机开发用 runtime-dev/): 硬编码 BASE_DIR/runtime 会让
+# run_dev.sh 声称的"不碰生产 runtime/"变成假话, 还会把生产失败现场截图轮转删掉。
+SCREENSHOT_DIR = RUNTIME_DIR / "heal_screenshots"
 
 # 每次选择器失败都会落一张截图, 无人值守长期运行须防无界增长
 _SCREENSHOT_KEEP = 20

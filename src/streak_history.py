@@ -20,9 +20,11 @@ from typing import Any
 
 from logutil import log
 
-HISTORY_FILE = (
-    Path(__file__).resolve().parent.parent / "runtime" / "streak_history.json"
-)
+from .config import RUNTIME_DIR
+
+# 路径只能从 config 取(AGENTS.md 第 9 条): 自己拼 BASE_DIR / "runtime" 会绕过
+# SPARK_RUNTIME_DIR, 于是 run_dev.sh 的开发记录写进生产 runtime/。
+HISTORY_FILE = RUNTIME_DIR / "streak_history.json"
 
 
 def _local_now() -> datetime:

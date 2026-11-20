@@ -27,16 +27,15 @@ import hashlib
 import json
 import os
 import time
-from pathlib import Path
 
 from logutil import log
 
 from . import recovery
+from .config import CONFIG_FILE, RUNTIME_DIR
 
-_PROJECT_DIR = Path(__file__).resolve().parent.parent
 # 告警去重账本: 同一错误签名每自然日最多告警 1 次 —— 告警疲劳是无人值守的大忌,
 # 每晚重复的同类故障不能淹没告警通道(与旧版冷却同一思路, 只是现在只挡告警)。
-_ALERT_FILE = _PROJECT_DIR / "runtime" / ".heal_alerted"
+_ALERT_FILE = RUNTIME_DIR / ".heal_alerted"
 
 # 动作 → 中文提示(仅用于日志可读性)
 _ACTION_HINT = {
@@ -51,7 +50,7 @@ _ACTION_HINT = {
 def _config() -> dict:
     """读 config.json(含机器私有配置, 不入 git); 读取/解析失败返回空 dict。"""
     try:
-        return json.loads((_PROJECT_DIR / "config.json").read_text(encoding="utf-8"))
+        return json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
     except Exception:
         return {}
 

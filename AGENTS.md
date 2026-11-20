@@ -16,13 +16,15 @@
 6. **退出码是外部契约**：0 完成/无待续/窗口外、1 一般异常、2 未登录、3 需冷启动重跑、4 未拿到 PID 锁（**不得当成功**）、124 超时被杀、130 人工中断。`run_cron.sh` 按它分流，别在 `spark.py` 里随手改。
 7. **判进程存活只能用 `src/runtime_lock.pid_alive()`**。`os.kill(pid, 0)` 在 POSIX 上只是探活，在 **Windows 上会 `TerminateProcess` 掉目标进程**（sig 参数被忽略）——2026-11-19 就是这么把 pytest 自己杀掉的，同一行代码在生产上的含义是「第二个实例杀掉第一个实例」而不是「拒绝启动」。PID 互斥、陈旧锁接管、`SPARK_SKIP_PID_LOCK` 豁免全在 `src/runtime_lock.py` 里，不要往别处复制。
 8. **平台相关的系统调用要写进模块并留单测**。仓库在 Windows 上开发、在 Linux 上运行，遇到「只有某个平台才有 / 语义相反」的 API（`/proc`、`OpenProcess`、`os.kill`），做法是抽象到一个模块里、用 `sys.platform` 分流，并在 `tests/` 里直接打那个模块——不要在业务函数里加 `if win32` 分支。
+9. **运行时路径只能从 `src/config.py` 取**（`RUNTIME_DIR` / `CONFIG_FILE`），不要自己拼 `BASE_DIR / "runtime"` 或 `BASE_DIR / "config.json"`。硬编码会绕过 `SPARK_RUNTIME_DIR` / `SPARK_CONFIG`，于是 `run_dev.sh` 声称的「不碰生产 runtime/」变成假话，调试截图轮转还会删掉生产失败现场（2026-11-20 修的三处：`src/debug.py` / `src/vision.py` / `src/self_heal.py`）。
 
 ## 仓库地图
 
 ```
 douyin-spark/
 ├── spark.py / login.py / logutil.py   # 入口与日志
-├── run_cron.sh / run_dev.sh           # 定时入口 / 开发入口
+├── run_cron.sh / run_cron.ps1         # 定时入口（Linux cron / Windows 计划任务）
+├── run_dev.sh                         # 开发入口（runtime-dev/）
 ├── config.example.json / config.dev.json / .env.example
 ├── src/                               # 全部业务逻辑（见 docs/architecture.md 的模块表）
 ├── tools/                             # 运维脚本，不参与发送主链路
@@ -41,6 +43,7 @@ python -m compileall -q src tests tools spark.py login.py logutil.py   # 语法�
 .venv/bin/ruff check .                                                # 静态检查
 .venv/bin/python spark.py --dry-run                                   # 演练：只走定位链路，不真发
 ./run_dev.sh --dry-run                                                # 本地开发（runtime-dev/，不碰正式账本）
+powershell -File run_cron.ps1                                         # Windows 侧手动跑一次定时入口
 .venv/bin/python -m src.health_check                                  # 巡检：今晚成没成
 .venv/bin/python -m src.weekly_report                                 # 周报（只读日志）
 ```
