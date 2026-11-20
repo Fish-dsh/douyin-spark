@@ -60,11 +60,18 @@ PERF_PROFILES = perf.PROFILES
 DEFAULT_PERF_PROFILE = perf.DEFAULT_PROFILE
 
 
+def _copy_hint() -> str:
+    """「复制示例配置」的写法按平台给 —— Windows 上没有 cp。"""
+    if sys.platform == "win32":
+        return "copy config.example.json config.json"
+    return "cp config.example.json config.json"
+
+
 def _read_config(path: Path) -> dict:
     """读取单个 JSON 配置文件; 缺失/损坏时按旧口径 sys.exit(1)。"""
     if not path.is_file():
         log(f"错误: 未找到配置文件 {path}")
-        log("请先 cp config.example.json config.json 并填写好友与窗口")
+        log(f"请先 {_copy_hint()} 并填写好友与窗口")
         sys.exit(1)
     try:
         data = json.loads(path.read_text(encoding="utf-8"))

@@ -234,6 +234,18 @@ def free_page_memory(page: Page) -> None:
         log(f"[mem] GC 触发失败: {exc}")
 
 
+def _expected_chromium(p) -> str:
+    """playwright 认为浏览器该装在哪 —— launch 失败时唯一有用的线索。
+
+    与 _CHROMIUM_PATH 不是一回事: 后者是"我们自己探测到的"(可能为 None, 于是交回
+    playwright 默认), 前者才是它真正去打开的那个路径。
+    """
+    try:
+        return str(p.chromium.executable_path)
+    except Exception:
+        return "(未知)"
+
+
 def launch_browser(p, cfg: dict):
     """按 cfg 启动 chromium。
 
@@ -251,9 +263,19 @@ def launch_browser(p, cfg: dict):
         display = cfg.get("display")
         if display:
             os.environ["DISPLAY"] = str(display)
-    browser = p.chromium.launch(
-        headless=headless, executable_path=_CHROMIUM_PATH, args=args
-    )
+    try:
+        browser = p.chromium.launch(
+            headless=headless, executable_path=_CHROMIUM_PATH, args=args
+        )
+    except Exception as exc:
+        # 演练实测(2026-11-20, Windows 无 ms-playwright 目录): 这里原本只抛一段
+        # 英文栈 "Executable doesn't exist at ...", 第一次上手的人看不出该装什么。
+        # 不吞异常 —— 上层要靠它判失败(发现阶段异常 → rc=1)。
+        log(f"错误: chromium 启动失败: {exc}")
+        log(f"  期望的可执行文件: {_expected_chromium(p)}")
+        log("  修法一: python -m playwright install chromium")
+        log("  修法二: 设环境变量 PLAYWRIGHT_CHROMIUM_PATH 指向已有的 chrome.exe")
+        raise
     memory_report("launch")
     return browser
 
@@ -329,6 +351,16 @@ def close_session(browser: Browser | None, context: BrowserContext | None) -> No
         log(f"[session] browser 关闭失败: {exc}")
 
 
+def _manual_login_cmd() -> str:
+    """人工登录命令: 按平台给 venv 里的解释器路径。
+
+    Windows 上没有 .venv/bin/, 照抄 Linux 那句会得到"路径不存在"。
+    """
+    if sys.platform == "win32":
+        return r".venv\Scripts\python login.py --manual"
+    return ".venv/bin/python login.py --manual"
+
+
 class LoginRequiredError(RuntimeError):
     """账号登录态失效且无法自动登录 —— 需要人工登录, 当晚重试也无益。
 
@@ -370,7 +402,8 @@ def _ensure_login(
         log(f"[登录] 账号 {acc_name} 缺少 account/password 配置, 跳过密码重登")
     dump_page(page)
     log(
-        f"【未登录】账号 {acc_name} 请运行 .venv/bin/python login.py --manual 用浏览器人工登录，或检查 config.json 账号配置"
+        f"【未登录】账号 {acc_name} 请运行 {_manual_login_cmd()} 用浏览器人工登录，"
+        "或检查 config.json 账号配置"
     )
     # 会话生命周期归 open_session 的 except 分支统一收(它会关 context, 以及
     # 本进程新建的 browser); 这里不能再自己关 browser —— 复用模式下那是多个账号

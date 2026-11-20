@@ -485,6 +485,60 @@ class TestLaunchBrowser(unittest.TestCase):
             launch_browser(p, {"headless": False})
             self.assertEqual(os.environ["DISPLAY"], ":0")
 
+    def test_launch_failure_prints_chinese_guidance(self):
+        """浏览器没装时不能只抛一段英文栈(2026-11-20 Windows 演练实测)。
+
+        playwright 的原始报错是 "Executable doesn't exist at ..." —— 第一次上手的人
+        看不出该装什么。异常必须原样抛出(上层靠它判 rc=1), 但日志要先给三条线索:
+        期望路径、install 命令、PLAYWRIGHT_CHROMIUM_PATH 兜底。
+        """
+        p = MagicMock()
+        p.chromium.executable_path = (
+            r"C:\Users\x\ms-playwright\chromium-1255\chrome.exe"
+        )
+        p.chromium.launch.side_effect = RuntimeError("Executable doesn't exist at ...")
+
+        with patch("src.session.log") as fake_log, self.assertRaises(RuntimeError):
+            launch_browser(p, {})
+
+        lines = [c.args[0] for c in fake_log.call_args_list]
+        joined = "\n".join(lines)
+        self.assertIn("chromium 启动失败", joined)
+        self.assertIn("chromium-1255", joined)  # 期望路径要打出来
+        self.assertIn("playwright install chromium", joined)
+        self.assertIn("PLAYWRIGHT_CHROMIUM_PATH", joined)
+
+    def test_launch_failure_skips_memory_report(self):
+        """启动失败后不该再报内存 —— 那行会让人误以为浏览器起来了。"""
+        p = MagicMock()
+        p.chromium.launch.side_effect = RuntimeError("boom")
+
+        with (
+            patch("src.session.log"),
+            patch("src.session.memory_report") as fake_mem,
+            self.assertRaises(RuntimeError),
+        ):
+            launch_browser(p, {})
+        fake_mem.assert_not_called()
+
+
+class TestManualLoginCmd(unittest.TestCase):
+    """未登录提示里的解释器路径按平台给(2026-11-20 Windows 演练实测)。"""
+
+    def test_posix_uses_bin(self):
+        from src.session import _manual_login_cmd
+
+        with patch("src.session.sys.platform", "linux"):
+            self.assertEqual(_manual_login_cmd(), ".venv/bin/python login.py --manual")
+
+    def test_windows_uses_scripts(self):
+        from src.session import _manual_login_cmd
+
+        with patch("src.session.sys.platform", "win32"):
+            self.assertEqual(
+                _manual_login_cmd(), ".venv\\Scripts\\python login.py --manual"
+            )
+
 
 class TestBuildLaunchArgs(unittest.TestCase):
     """档位选择(2026-11-01): low=板端档零回归, high=本机桌面档放开资源上限。"""
