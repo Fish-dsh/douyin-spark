@@ -27,6 +27,7 @@
 ④ `install.sh`（根目录，幂等，`--check` 只报告不动文件）：解释器(≥3.11) → venv → pip → chromium → Xvfb → config.json/.env → 时区，每步 `[ok]/[skip]/[--]/[fail]`，失败直接说「哪一步 + 该执行什么命令」。板端实测第一版把 chromium 判成「没下载」：脚本按 `$HOME/.cache/ms-playwright` 找，而 root ssh 进去 HOME=/root、实际装在 `/home/orangepi/.cache`（cron 以 orangepi 跑）。改成遍历 `PLAYWRIGHT_BROWSERS_PATH` + `/home/*/.cache/ms-playwright` 后板上 6/6 全绿 rc=0。
 ⑤ operations.md 退出码表加第四列「轮到你（或 Agent）时做什么」：0→`--status` 核对、1→看失败原因、2→login.py 扫码并同步 storage.json、3→不用管、4→ps 查残留 chromium 或删 `.spark.pid`、124→01:45 巡检会逐账号报。另加「先看状态」一节并放在「时间口径」之前——出事第一件事不该是翻日志。
 ⑥ 验证：本机 **665 passed, 1 skipped**（653 → +12，`tests/test_status.py` 12 例）；ruff check / format 全绿（`src/status.py` 进 per-file-ignores 的 DTZ005：最近一夜按机器本地自然日划分，与 spark.log 同口径）；板端 `install.sh --check` rc=0、`spark.py --status` 对真实日志输出正确。README 快速开始与部署块收敛成一条 `./install.sh`，代码地图补 `install.sh` 与 `src/status.py`（模块数 22→23）。
+⑦ 上板与推送：`tools/deploy.sh` 部署快照 `20261122-025539`（冒烟 `accounts: ['main','17264207155'] / notify_cmd: yes / import ok`），板端 `.venv/bin/python -m pytest -q` **690 passed**、`ruff check` 全绿、`bash install.sh --check` 6/6 `rc=0`、`spark.py --status` 对真实日志输出「发送 8 / 8, 失败 0」。本机积压的 6 个提交一并推送，origin/main 从 `b7cdea4` 前进到 `af9d965`。从今晚 00:00 起，出问题时的第一句话是 `python spark.py --status`，不是翻日志。
 
 - **2026-11-22 · 会话 66（会话 53–65 一次性上板：上板通道自己先坏了）**：
 ① 起点=用户「OK，你上呗」。板子代码此前停在会话 52 的部署快照（`73889aa5`，11-19 19:59），中间 13 个会话的改动从没在板上跑过——这次是这批改动**第一次进生产环境**。
