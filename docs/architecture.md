@@ -57,7 +57,7 @@ cron 01:45 ──► src/health_check.py：日期 / 收尾 / 有头配置 / Xvfb
 | `src/stealth.py` | 浏览器特征伪装（只伪造自动化标记，不碰滑块/验证码） |
 | `src/vision.py` | 视觉兜底：多模态粗定位 + DOM 现场取证（左栏先打码） |
 | `src/vision_cv.py` | 纯 OpenCV 找红色发送按钮（无网络、无模型，毫秒级） |
-| `src/net_sniff.py` | 被动旁路嗅探，仅作"接口改版"的诊断金丝雀 |
+| `src/net_sniff.py` | 被动旁路嗅探：接口改版的诊断金丝雀 + 发送窗口的上行帧旁证（只计数不判定） |
 | `src/debug.py` | 调试截图与页面 dump |
 | `src/config.py` | 配置 / 状态 / 窗口判定 / 环境变量 |
 | `tools/` | 运维脚本（不参与发送主链路）：`verify.py` 自检、`import_browser_cookies.py` 登录态导入、心跳看门狗、策略统计、网络观测 |

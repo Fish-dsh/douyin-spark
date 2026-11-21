@@ -20,6 +20,14 @@
 
 ## 会话时间线
 
+- **2026-11-22 · 会话 65（发送窗口的网络旁证：气泡画出来 ≠ 数据推出去）**：
+① 起点=用户问「你用了那个抓包确定发出消息了没」，答：没有。`src/net_sniff.py` 一直是**诊断金丝雀**（只看抖音有没有把会话数据从 protobuf 改回明文 JSON），从不参与发送确认。现有确认是纯界面证据——`read_tail` 取基线、`confirm_send` 比「新增气泡/尾部窗口移动」，它证明的是「客户端把气泡画出来了」。
+② 能补的一半：数发送前后有没有新的**上行帧**。补不了的另一半：服务器是否 ACK（那要解 protobuf ＝ 私有协议逆向，AGENTS.md 硬约束④明令不做）。所以这条证据的定位写死在代码注释里：**弱佐证，不进判定**。
+③ 实现刻意做到最小：`NetSniffer` 只加一个 `ws_frames_sent` 整数，`ws.on("framesent", _sent)` 里自增、**不读 `frame.text`**（上行全是二进制，读了也是死重量）；这个计数不受 `_MAX_PAYLOADS=80` 封顶影响 —— 旧 `_frame` 在记录满额后连计数一起冻住，正是它不能直接复用来做旁证的原因。
+④ 两个窗口：表情层在 `send_sticker` 包住「点击 → `_await_sticker_result`」，文字层在 `process_friend` 包住「`send_message` → `confirm_send`」。**只写日志，不改 `result`** —— `net_sniff.note_send_window` 返回 `(上行增量, 下行增量)` 但没有任何调用方拿它做判断。这条边界要守住：把网络当判据，等于在没有 ACK 的前提下凭空造一个「发成功」口径。
+⑤ 两个细节：窗口内若因页面重载导致计数器归零，差值用 `max(0, …)` 钳成 0 而不是负数；`before` 是 `(0,0)` 时照常记录「旁证=无」—— 什么都没发生也是一条结论，静默跳过会让「没动静」和「没挂上嗅探器」混成一团。
+⑥ 验证：`python -m compileall -q src` OK；`python -m ruff check .` All checks passed；`python -m pytest -q` **652 passed, 1 skipped**（会话 64 末 644 → +8，全部在 `tests/test_net_sniff.py` 的 `TestSentFrames` / `TestSendWindow`）。上板后判据：`grep "发送窗口" runtime/spark.log` 应每人一行，正常夜是 `旁证=有`；若出现 `旁证=无` 却报了发送成功，说明「界面有气泡、客户端没往外推数据」，值得抄进下一轮核账。
+
 - **2026-11-20 · 会话 64（复用浏览器里已登好的抖音：三条死路之后用扩展把 cookie 拿出来）**：
 ① 起点=用户「你能直接复用Edge的登录态对吧？」→「我看到过其他绘画的你能直接复用edge登录后的那个Cookies。现在我已经登好了」→「你是不是卡住了？怎么用了这么久？实在不行你可以查一下呀。不要自己逞强」。要的是**省掉扫码**，不是再给他一个登录入口。
 ② **三条死路，都试穿了**：⑴ 直接读 `Default/Network/Cookies` —— Chrome/Edge 127+ 起是 ABE(v20)，`Local State` 里 `app_bound_encrypted_key` 用 DPAPI 解出 `0x8009000B NTE_BAD_KEY_STATE`；查到的现成方案（xiecat 的 ABE 解密）靠**把 DLL 注入浏览器进程**再调 IElevator COM（IElevator 只认浏览器安装目录内的调用方），这条路要编译注入，与「不碰验证码、不做协议逆向」的定位冲突，弃。⑵ 开 `--remote-debugging-port` 连现有 Edge —— 官方硬拒：`DevTools remote debugging requires a non-default data directory`。⑶ 复制 profile 到临时目录再开 —— 浏览器启动时把解不开的 v20 cookie **直接删掉**，`BEFORE (253,58)` → `CTX total=41 douyin=0` → `AFTER (41,0)`；ABE key 与 profile 路径绑定，换目录即废。
