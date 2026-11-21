@@ -20,6 +20,16 @@
 
 ## 会话时间线
 
+- **2026-11-22 · 会话 66（会话 53–65 一次性上板：上板通道自己先坏了）**：
+① 起点=用户「OK，你上呗」。板子代码此前停在会话 52 的部署快照（`73889aa5`，11-19 19:59），中间 13 个会话的改动从没在板上跑过——这次是这批改动**第一次进生产环境**。
+② 第一次 deploy 直接失败并自动回滚：`tools/deploy.sh` 第 4 步的冒烟脚本还写着 `from src.config import preflight`，而这个函数在会话 53 前后就从 `config.py` 里没了。结论有点难听：**上板通道从建立那天起就没被真跑过一次**，只要跑必然 ImportError → 回滚。改成 `load_config()` 后自己补闸门（accounts 为空 / 条目缺 name 直接 `sys.exit(1)`），因为 `load_config` 对空 accounts 只 log 一句警告就放行——2026-11-02 静默断火一整晚正是这个形状。两条分支都用假配置验过：非空 → `import ok`，空 → rc=1。
+③ 第二次 deploy 成功：冒烟输出 `accounts: ['main','17264207155']` / `notify_cmd: yes` / `import ok`。板上 `config.json` 仍是 777 字节 0600、属主 orangepi、mtime 2026-11-01——**没有被覆盖**；orangepi 的三条 cron 完好；`src/tests/tools/docs` 全为 orangepi:orangepi；`run_cron.sh` 里 `export SPARK_PERF_PROFILE=low` 在位；`src/net_sniff.py` 与本地 md5 一致（`31f3d39f`）。
+④ 板端首跑 pytest 揪出两条平台耦合用例，都不是产品缺陷，是用例把开发机当成唯一环境：`test_health_check.TestPathEnv` 拿 `C:/opt/...` 冒充绝对路径，Linux 上那是相对路径 → 改用 `BASE_DIR` 拼；`test_import_browser_cookies.TestRunningCount` 只 mock 了 `subprocess.run` 却喂 tasklist 格式输出，Linux 走 pgrep 分支 → `int('msedge.exe ...')` 抛 ValueError 被吞成 0，补 `sys.platform` 一并钉住，并顺手补了 pgrep 分支的覆盖（生产就在 Linux 板上）。
+⑤ 板上根目录还有个残留 `probe_tail.py`（会话 47–52 的板端 DOM 探针 v5，不属于仓库），让板端 ruff 报两条 RUF100，真错误会被淹掉。移到 `board-backups/` 后板端 ruff All checks passed。
+⑥ 两边测试数差 24 `不是` 漂移：板上 `tests/test_wlog.py`（配套 `tools/wlog.py`）是内部记档守护工具，按 worklog 头部约定不进公开快照，所以本地收集 654、板上 678，两边各自 0 失败。
+⑦ 验证口径：本地 `ruff check` All checks passed / `format --check` 75 files / `pytest -q` **653 passed, 1 skipped**（收集 654）；板端 `.venv/bin/python -m pytest -q` **678 passed**、`ruff check` All checks passed。提交 `b2acdb6`（fix(deploy)）与 `5c6e3c3`（test 钉平台）。
+⑧ 仍待观察：**今晚 00:00 是这批改动的首次生产实跑**（浏览器复用/按内存回收、CV 兜底红↑、`runtime_lock` 拆模块、perf 档位焊死、上行帧旁证）。判据=当晚 `runtime/spark.log` 里每人一行 `[net] 发送窗口上行帧 +N 下行帧 +M 旁证=有`、无 `[perf][warn]`、退出码 0 或无待续；出现 `旁证=无` 却报发送成功，说明「气泡画出来了、客户端没往外推」，值得抄进下一轮核账。
+
 - **2026-11-22 · 会话 65（发送窗口的网络旁证：气泡画出来 ≠ 数据推出去）**：
 ① 起点=用户问「你用了那个抓包确定发出消息了没」，答：没有。`src/net_sniff.py` 一直是**诊断金丝雀**（只看抖音有没有把会话数据从 protobuf 改回明文 JSON），从不参与发送确认。现有确认是纯界面证据——`read_tail` 取基线、`confirm_send` 比「新增气泡/尾部窗口移动」，它证明的是「客户端把气泡画出来了」。
 ② 能补的一半：数发送前后有没有新的**上行帧**。补不了的另一半：服务器是否 ACK（那要解 protobuf ＝ 私有协议逆向，AGENTS.md 硬约束④明令不做）。所以这条证据的定位写死在代码注释里：**弱佐证，不进判定**。
