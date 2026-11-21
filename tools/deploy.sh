@@ -11,7 +11,7 @@
 #      打包完还会再验一遍压缩包内容, 混进敏感文件就直接停手(见 assert_clean)。
 #   2. 远端每一步都在 `bash -s` + `set -euo pipefail` 里跑 —— 不许用 `;` 把命令链
 #      断开, 否则 tar 失败也会被后面 chown 的成功掩盖, 一路 rc=0 静默上线半套代码。
-#   3. 传完必须校验目标机 accounts 非空(走 src/config.py::preflight), 失败就回滚
+#   3. 传完必须校验目标机 accounts 非空(走 src.config.load_config), 失败就回滚
 #   4. 传完跑一次 import 冒烟, 失败也回滚
 #
 # 回滚不是万能的: 它能把被覆盖的文件还原成上一版、并把本次新增的文件删掉,
@@ -40,11 +40,19 @@ trap 'rm -f "$SMOKE" "$NEW_TGZ"' EXIT
 cat >"$SMOKE" <<'PY'
 import sys
 sys.path.insert(0, '.')
-from src.config import load_config, preflight
+from src.config import load_config
 
 cfg = load_config()
-preflight(cfg)                    # accounts 为空 / 条目缺 name 会抛 ConfigError
-print('accounts:', [a.get('name') for a in cfg['accounts']])
+# accounts 为空必须硬拦, 不能只打印警告: 2026-11-02 就是带着空 config 上线,
+# 当晚跑 0 个好友仍返回 rc=0, 巡检判健康, 静默断火一整晚。
+# 注意 load_config 对空 accounts 只 log 一句警告就放行, 所以闸门得由这里补上。
+accounts = cfg.get("accounts") or []
+if not accounts:
+    sys.exit('[SMOKE][ERROR] 目标机 config.json 的 accounts 是空的')
+bad = [a for a in accounts if not isinstance(a, dict) or not a.get("name")]
+if bad:
+    sys.exit(f'[SMOKE][ERROR] accounts 条目缺 name: {bad}')
+print('accounts:', [a.get('name') for a in accounts])
 print('notify_cmd:', 'yes' if cfg.get('notify_cmd') else 'NO(失败时不会有任何告警)')
 import src.scheduler  # noqa: F401   冒烟: 主链路模块能 import
 print('import ok')
