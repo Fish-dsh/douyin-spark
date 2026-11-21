@@ -9,7 +9,7 @@ from playwright.sync_api import Page
 
 from logutil import log
 
-from . import events, perf, vision, vision_cv
+from . import events, net_sniff, perf, vision, vision_cv
 from .debug import dump_page
 from .finder import find
 
@@ -1414,6 +1414,7 @@ def send_sticker(
         # 基线必须在**点击表情之前**取: 文案固定为「续火花」, 昨晚那条表情还挂在列表
         # 尾部, 只比文本会把残留读成本次发送。
         base = read_tail(page)
+        tally0 = net_sniff.counts(page)
         page.mouse.click(target["x"], target["y"])
         # 点击本身不是证据(没抛异常≠发出去了), verified 只能是 None
         _emit_sticker(
@@ -1423,7 +1424,10 @@ def send_sticker(
             verified=None,
             extra={"x": target["x"], "y": target["y"], "n0": base[0]},
         )
-        return _await_sticker_result(page, sticker_name, base, trace)
+        result = _await_sticker_result(page, sticker_name, base, trace)
+        # 网络旁证: 只写日志, 不改 result —— 界面证据仍是唯一结论来源
+        net_sniff.note_send_window(page, tally0, friend)
+        return result
     except Exception as exc:
         _emit_sticker(trace, "verify", "failed", error_class=type(exc).__name__)
         return False, f"表情发送异常: {exc}"

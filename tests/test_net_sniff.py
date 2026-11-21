@@ -7,7 +7,13 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from src.net_sniff import _MAX_PAYLOADS, NetSniffer, sniff_report
+from src.net_sniff import (
+    _MAX_PAYLOADS,
+    NetSniffer,
+    counts,
+    note_send_window,
+    sniff_report,
+)
 
 
 class FakeResponse:
@@ -34,6 +40,10 @@ class FakeWS:
     def emit_frame(self, text):
         frame = type("F", (), {"text": text})()
         self._handlers["framereceived"](frame)
+
+    def emit_sent(self, payload=b""):
+        frame = type("F", (), {"payload": payload})()
+        self._handlers["framesent"](frame)
 
 
 class FakePage:
@@ -167,6 +177,68 @@ class TestMemoryBound(unittest.TestCase):
         parsed = sniffer.parsed_payloads()
         self.assertLessEqual(len(parsed), 6)
         self.assertEqual(parsed[-1]["obj"]["conversation"]["i"], 9)
+
+
+class TestSentFrames(unittest.TestCase):
+    """上行帧只计数不留样本: 供发送窗口判断「客户端有没有往外推数据」。"""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.page = FakePage()
+        self.sniffer = NetSniffer("main", samples_dir=Path(self.tmp.name))
+        self.sniffer.attach(self.page)
+        self.ws = FakeWS()
+        self.page._handlers["websocket"](self.ws)
+
+    def test_sent_frames_counted_without_storing(self):
+        for _ in range(3):
+            self.ws.emit_sent(b"\x08\x01")
+        self.assertEqual(self.sniffer.counts(), (0, 3))
+        self.assertEqual(self.sniffer.recorded, 0)  # 二进制帧一条样本都不落
+
+    def test_sent_count_survives_payload_cap(self):
+        # 记录额度用完不该连带把旁证计数一起冻住(旧 _frame 的 return 有这毛病)
+        self.sniffer.recorded = _MAX_PAYLOADS
+        self.ws.emit_sent()
+        self.ws.emit_sent()
+        self.assertEqual(self.sniffer.counts()[1], 2)
+
+    def test_counts_without_sniffer_is_zero(self):
+        self.assertEqual(counts(FakePage()), (0, 0))
+
+    def test_counts_none_page_is_zero(self):
+        self.assertEqual(counts(None), (0, 0))
+
+
+class TestSendWindow(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.page = FakePage()
+        self.sniffer = NetSniffer("main", samples_dir=Path(self.tmp.name))
+        self.sniffer.attach(self.page)
+        self.ws = FakeWS()
+        self.page._handlers["websocket"](self.ws)
+
+    def test_returns_delta(self):
+        before = counts(self.page)
+        self.ws.emit_sent()
+        self.ws.emit_sent()
+        self.ws.emit_frame('{"conversation": {}}')
+        self.assertEqual(note_send_window(self.page, before, "小明"), (2, 1))
+
+    def test_no_traffic_still_reported(self):
+        # 一点动静都没有也是一条结论(旁证=无), 不能静默跳过
+        self.assertEqual(note_send_window(self.page, counts(self.page)), (0, 0))
+
+    def test_without_sniffer_returns_none(self):
+        self.assertIsNone(note_send_window(FakePage(), (0, 0)))
+
+    def test_counter_reset_clamped_to_zero(self):
+        # 窗口里发生页面重载时计数从头开始, 差值不许是负数
+        self.ws.emit_sent()
+        self.assertEqual(note_send_window(self.page, (0, 99)), (0, 0))
 
 
 class TestSniffReport(unittest.TestCase):

@@ -14,7 +14,7 @@ from playwright.sync_api import sync_playwright
 
 from logutil import _offline_entry, log
 
-from . import events, perf, recovery, runtime_lock, streak_history
+from . import events, net_sniff, perf, recovery, runtime_lock, streak_history
 from .config import (
     CHAT_URL,
     DEFAULT_BROWSER_RECYCLE_MB,
@@ -30,7 +30,6 @@ from .config import (
 from .debug import dump_page
 from .discovery import HealRetryFailed, RenderHangDetected, discover_pending_friends
 from .finder import chat_page_ready, page_render_state, wait_chat_list, wait_chat_ui
-from .net_sniff import sniff_report
 from .self_heal import self_heal
 from .sender import (
     click_friend,
@@ -522,6 +521,7 @@ def process_friend(
     base = read_tail(page)
     log(f"[确认] 文字层基线: 气泡数={base[0]}, 尾部={base[1][:24]!r}")
     a_text = events.attempt_id()
+    tally0 = net_sniff.counts(page)
     sent, method = send_message(
         page,
         SEND_STICKER,
@@ -540,6 +540,8 @@ def process_friend(
         account=acc_name,
     )
     log(f"[确认] {detail}")
+    # 网络旁证: 只写日志, 不参与判定(与表情层同口径)
+    net_sniff.note_send_window(page, tally0, name)
     _mark("文字确认")
     # 与 confirm_send 共用 a_text: 先报 ok 又被否掉 = false_positive(谎报)
     events.emit(
@@ -638,7 +640,7 @@ def _discover_with_hang_retry(
                 )
             pending = discover_pending_friends(page, cfg, state, today, force, dry_run)
             _heartbeat("discover_done", account.get("name", "?"))
-            sniff_report(page)
+            net_sniff.sniff_report(page)
             if pending:
                 save_session_state(context, account, tag=" (发现阶段)")
                 memory_report("discovery-handoff")

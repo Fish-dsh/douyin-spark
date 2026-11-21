@@ -68,6 +68,9 @@ class NetSniffer:
         self.recorded = 0
         self.responses_seen = 0
         self.ws_frames_seen = 0
+        # 上行帧只计数、不留样本: 发送窗口的旁证只需要「有没有往外发东西」这一个整数,
+        # 内容全是二进制 protobuf, 存下来也是死重量。
+        self.ws_frames_sent = 0
         # 诊断: URL 命中但被过滤/失败的记录(去重, 封顶)与 WS 连接清单
         self.misses: list[str] = []
         self.ws_urls: list[str] = []
@@ -148,6 +151,12 @@ class NetSniffer:
                     pass
 
             ws.on("framereceived", _frame)
+
+            def _sent(_frame):
+                # 不要在这里读 frame.text: 上行基本都是二进制 protobuf, 读了也用不上
+                self.ws_frames_sent += 1
+
+            ws.on("framesent", _sent)
         except Exception:
             pass
 
@@ -198,10 +207,14 @@ class NetSniffer:
     def parsed_payloads(self) -> list[dict]:
         return list(self._parsed)
 
+    def counts(self) -> tuple[int, int]:
+        """(下行帧, 上行帧) 计数快照; 供发送窗口做旁证。"""
+        return self.ws_frames_seen, self.ws_frames_sent
+
     def summary(self) -> str:
         return (
-            f"响应命中 {self.responses_seen} 条/WS帧 {self.ws_frames_seen} 条, "
-            f"记录 {self.recorded} 条样本"
+            f"响应命中 {self.responses_seen} 条/WS下行 {self.ws_frames_seen} 条"
+            f"/WS上行 {self.ws_frames_sent} 条, 记录 {self.recorded} 条样本"
             + (f" -> {self._file.name}" if self._file else "(无样本落盘)")
         )
 
@@ -221,3 +234,37 @@ def sniff_report(page) -> None:
             log(f"[sniff] {sniffer.summary()}")
     except Exception:
         pass
+
+
+def counts(page) -> tuple[int, int]:
+    """取当前页面的 (下行帧, 上行帧) 计数; 嗅探器没挂上时返回 (0, 0)。"""
+    try:
+        sniffer = getattr(page, "_spark_sniffer", None)
+        return sniffer.counts() if sniffer is not None else (0, 0)
+    except Exception:
+        return (0, 0)
+
+
+def note_send_window(
+    page, before: tuple[int, int], friend: str = ""
+) -> tuple[int, int] | None:
+    """发送窗口的网络旁证: 点完表情后客户端有没有真的往外发东西。
+
+    只记录, 不参与判定 —— 界面证据(气泡出现 / 面板关闭)仍是唯一结论来源。
+    这个数字补的是另一半: 「气泡画出来」不等于「数据推出去了」, 而上行帧数能证明
+    后者的一半(推送发生过), 证明不了服务器 ACK(那要解 protobuf, 项目不做)。
+    读不到就闭嘴, 不制造噪音。返回 (上行增量, 下行增量); 嗅探器没挂上时返回 None。
+    """
+    try:
+        sniffer = getattr(page, "_spark_sniffer", None)
+        if sniffer is None:
+            return None
+        recv_now, sent_now = sniffer.counts()  # counts() 的顺序是 (下行, 上行)
+        # 窗口里若发生过页面重载, 计数器会从头来, 差值取 0 而不是负数
+        sent = max(0, sent_now - before[1])
+        recv = max(0, recv_now - before[0])
+        tag = "有" if sent > 0 else "无"
+        log(f"[net] 发送窗口上行帧 +{sent} 下行帧 +{recv} 旁证={tag} ({friend})")
+        return sent, recv
+    except Exception:
+        return None
