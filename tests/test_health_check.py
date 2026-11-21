@@ -869,7 +869,9 @@ class TestPathEnv(unittest.TestCase):
                 health_check._env_path("SPARK_RUNTIME_DIR", Path("/fallback")),
                 health_check.BASE_DIR / "runtime-dev",
             )
-        absolute = Path("C:/opt/douyin-spark/config.prod.json")
+        # 不能写死 "C:/opt/..."：在 Linux 上那是相对路径，断言必然失败。
+        # 用 BASE_DIR（= 项目根，一定是绝对路径）拼出来，两边都成立。
+        absolute = health_check.BASE_DIR / "config.prod.json"
         with patch.dict(os.environ, {"SPARK_CONFIG": str(absolute)}):
             self.assertEqual(
                 health_check._env_path("SPARK_CONFIG", Path("/fallback")),

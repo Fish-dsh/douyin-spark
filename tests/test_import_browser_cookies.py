@@ -137,11 +137,26 @@ class TestRunningCount(unittest.TestCase):
             self.assertEqual(ibc.running_count(ibc.Path("msedge.exe")), 0)
 
     def test_counts_only_matching_lines(self) -> None:
+        # 这段输出是 Windows tasklist 的格式，必须连平台一起钉住：
+        # 只 mock subprocess.run 的话，Linux 上会走 pgrep 分支，
+        # int("msedge.exe  1234 ...") 抛 ValueError 被吞成 0。
         fake = unittest.mock.Mock(
             stdout="msedge.exe  1234 Console  1  100 K\nmsedge.exe  5678 Console  1  100 K\n"
         )
-        with unittest.mock.patch.object(ibc.subprocess, "run", return_value=fake):
+        with (
+            unittest.mock.patch.object(ibc.subprocess, "run", return_value=fake),
+            unittest.mock.patch.object(ibc.sys, "platform", "win32"),
+        ):
             self.assertEqual(ibc.running_count(ibc.Path("msedge.exe")), 2)
+
+    def test_counts_pgrep_output(self) -> None:
+        # 生产在 Linux 板上，pgrep -fc 只回一个数字
+        fake = unittest.mock.Mock(stdout="3\n")
+        with (
+            unittest.mock.patch.object(ibc.subprocess, "run", return_value=fake),
+            unittest.mock.patch.object(ibc.sys, "platform", "linux"),
+        ):
+            self.assertEqual(ibc.running_count(ibc.Path("/usr/bin/google-chrome")), 3)
 
 
 class TestBrowserCandidates(unittest.TestCase):
