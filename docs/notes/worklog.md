@@ -20,6 +20,14 @@
 
 ## 会话时间线
 
+- **2026-11-22 · 会话 67（给 Agent 的合约：--status / install.sh / 退出码怎么办）**：
+① 起点=用户问「为什么没人用」，随后把方向拨到「可以交给 WorkBuddy 这种 agent」。结论是 Agent 只吃得掉「装」这一步，顶不住的是机器（要 24h 开机的 Linux）、登录（必须人扫码、37 天过期还会被踢）、出事（第 30 天才会遇到的页面改版/网络假死，那时 Agent 早走了）。**缺的不是 Agent 能力，是给 Agent 的合约**：装要一条命令、状态要一句话、故障要有下一步。这三样恰好也是给未来自己的入口。
+② `spark.py --status`（新增 `src/status.py`）：只读 `spark.log`（含轮转）与 `heartbeat.json`，输出「今天凌晨(2026-11-22) 那一轮: 发送 8 / 8, 失败 0 / main 3/3 · 17264207155 5/5 ｜ 耗时 5m30.0s」。失败逐条带原因（`处理失败(本地策略: 重试)` → 「本地策略: 重试」），再按原因给建议（登录态失效→login.py 扫码、重试/未确认→看当晚截图）。`--json` 给程序读。三条取舍：**不写日志**（会污染 01:45 巡检的「当日收尾」判定，同周报纪律）、**退出码恒 0**（它回答「怎么样了」不是「成没成」，不能污染 run_cron 的 rc 协议）、**不调 load_config**（它会 log，只把 config.json 当纯文本读窗口）。
+③ 「没有数据 ≠ 健康」也落在这里：最近 7 天没有完整的一夜时直说「没有完整的一夜」并给出最后一次日志日期；半路死掉的夜（只有开头、没有 `完成:` 行）不算数，会跳过它往前找——那种夜比没跑更危险。`spark.py` 在 import scheduler **之前**分流 `--status`，查询路径不加载 playwright。
+④ `install.sh`（根目录，幂等，`--check` 只报告不动文件）：解释器(≥3.11) → venv → pip → chromium → Xvfb → config.json/.env → 时区，每步 `[ok]/[skip]/[--]/[fail]`，失败直接说「哪一步 + 该执行什么命令」。板端实测第一版把 chromium 判成「没下载」：脚本按 `$HOME/.cache/ms-playwright` 找，而 root ssh 进去 HOME=/root、实际装在 `/home/orangepi/.cache`（cron 以 orangepi 跑）。改成遍历 `PLAYWRIGHT_BROWSERS_PATH` + `/home/*/.cache/ms-playwright` 后板上 6/6 全绿 rc=0。
+⑤ operations.md 退出码表加第四列「轮到你（或 Agent）时做什么」：0→`--status` 核对、1→看失败原因、2→login.py 扫码并同步 storage.json、3→不用管、4→ps 查残留 chromium 或删 `.spark.pid`、124→01:45 巡检会逐账号报。另加「先看状态」一节并放在「时间口径」之前——出事第一件事不该是翻日志。
+⑥ 验证：本机 **665 passed, 1 skipped**（653 → +12，`tests/test_status.py` 12 例）；ruff check / format 全绿（`src/status.py` 进 per-file-ignores 的 DTZ005：最近一夜按机器本地自然日划分，与 spark.log 同口径）；板端 `install.sh --check` rc=0、`spark.py --status` 对真实日志输出正确。README 快速开始与部署块收敛成一条 `./install.sh`，代码地图补 `install.sh` 与 `src/status.py`（模块数 22→23）。
+
 - **2026-11-22 · 会话 66（会话 53–65 一次性上板：上板通道自己先坏了）**：
 ① 起点=用户「OK，你上呗」。板子代码此前停在会话 52 的部署快照（`73889aa5`，11-19 19:59），中间 13 个会话的改动从没在板上跑过——这次是这批改动**第一次进生产环境**。
 ② 第一次 deploy 直接失败并自动回滚：`tools/deploy.sh` 第 4 步的冒烟脚本还写着 `from src.config import preflight`，而这个函数在会话 53 前后就从 `config.py` 里没了。结论有点难听：**上板通道从建立那天起就没被真跑过一次**，只要跑必然 ImportError → 回滚。改成 `load_config()` 后自己补闸门（accounts 为空 / 条目缺 name 直接 `sys.exit(1)`），因为 `load_config` 对空 accounts 只 log 一句警告就放行——2026-11-02 静默断火一整晚正是这个形状。两条分支都用假配置验过：非空 → `import ok`，空 → rc=1。

@@ -40,11 +40,7 @@ Linux：
 ```bash
 git clone <this-repo> douyin-spark && cd douyin-spark
 
-python3 -m venv .venv
-.venv/bin/pip install -r requirements.txt
-.venv/bin/playwright install chromium          # 首次需要下载浏览器
-
-cp config.example.json config.json             # 好友名单无需配置，扫描自动发现
+./install.sh                                   # 解释器/依赖/浏览器/Xvfb/配置, 幂等, 缺什么直接说
 
 # 生成登录态（三选一）
 .venv/bin/python tools/import_browser_cookies.py --account main   # 复用日常 Edge 里已登好的抖音
@@ -77,11 +73,12 @@ copy config.example.json config.json
 
 | 想干什么 | 命令 |
 | -------- | ---- |
+| 昨晚到底成没成（一句话） | `python spark.py --status` |
 | 演练（不真发） | `python spark.py --dry-run` |
 | 立刻补发（无视时间窗） | `python spark.py --force` |
 | 登录态失效后重新登录 | `python login.py --manual` |
 | 复用浏览器里已登好的抖音 | `python tools/import_browser_cookies.py --account main` |
-| 今晚到底成没成 | `python -m src.health_check` |
+| 配置/收尾/有头/显示四项巡检 | `python -m src.health_check` |
 | 这周有人断了吗 | `python -m src.weekly_report` |
 | 提交前自检 | `python tools/verify.py` |
 | 本地开发（不碰正式账本） | `./run_dev.sh --dry-run` |
@@ -109,9 +106,8 @@ Linux + cron：
 
 ```bash
 sudo rsync -a --exclude runtime --exclude .venv ./ /opt/douyin-spark/   # 1. 放代码（路径可在 run_cron.sh 改）
-cd /opt/douyin-spark && python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
-.venv/bin/playwright install --with-deps chromium                       # 2. 装依赖
-sudo apt install -y xvfb                                                 # 3. Xvfb 常驻 :99
+sudo apt install -y xvfb                                                 # 2. 虚拟显示（有头浏览器的前提）
+cd /opt/douyin-spark && ./install.sh                                     # 3. 依赖 + 浏览器 + 配置, 幂等可重跑
 # 4. crontab：
 #   0 0 * * *  cd /opt/douyin-spark && ./run_cron.sh
 #  45 1 * * *  cd /opt/douyin-spark && .venv/bin/python -m src.health_check
@@ -141,7 +137,8 @@ schtasks /Create /TN douyin-spark-check /SC DAILY /ST 01:45 /TR ^
 想改哪里先看这里（完整链路见 [docs/architecture.md](docs/architecture.md)）：
 
 ```
-spark.py             入口：参数 → 时间窗校验 → src.scheduler.run()
+install.sh           一条命令装好：解释器/依赖/浏览器/Xvfb/配置（幂等，--check 只检查）
+spark.py             入口：参数 → (--status 走只读查询) → 时间窗校验 → src.scheduler.run()
 run_cron.sh          cron 包装（Linux）：超时兜底、硬截止、退出码转重试
 run_cron.ps1         同一套判据的 Windows 版（计划任务入口）
 src/scheduler.py     唯一的编排者：发现 → 逐个好友 → 表情 → 文字 → 视觉兜底
@@ -150,12 +147,13 @@ src/discovery.py     扫聊天列表，挑出「有火花且今天没动静」�
 src/spark_status.py  火花天数识别：CSS 类名 → 文本特征 → 火焰图标 → 结构兜底
 src/sender.py        发送与确认：表情面板、文字、几何点击、新增气泡判定
 src/self_heal.py     错误分类 → 恢复动作 → 告警
+src/status.py        一句话状态：最近一夜发了几个、失败在哪、下一步查什么
 src/health_check.py  次日巡检（CLI，也是告警出口）
 tools/               自检入口 verify.py + 诊断脚本：策略直方图、任务看门狗、协议嗅探金丝雀
 tests/               全量 `pytest -q`，不开浏览器、不碰真账号（耗时看末行）
 ```
 
-依赖是单向的：`logutil` / `src.config` / `src.perf` 是底座，`src.scheduler` 只往下调，兄弟模块之间互不 import（22 个模块，零循环依赖）。
+依赖是单向的：`logutil` / `src.config` / `src.perf` 是底座，`src.scheduler` 只往下调，兄弟模块之间互不 import（23 个模块，零循环依赖）。
 
 ## 文档
 
