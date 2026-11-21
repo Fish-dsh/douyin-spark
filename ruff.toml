@@ -27,6 +27,8 @@ ignore = [
 "src/net_sniff.py" = ["DTZ005"]
 # 视觉截图文件名时间戳按机器本地时: 同上
 "src/vision.py" = ["DTZ005"]
+# "最近一夜"按机器本地自然日划分, 与 spark.log 时间戳同口径
+"src/status.py" = ["DTZ005"]
 "health_check.py" = ["DTZ005"]
 # 日志按天分桶用机器本地日期: 与 spark.log 时间戳同口径
 "strat_stats.py" = ["DTZ005"]
