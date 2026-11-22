@@ -74,6 +74,7 @@ copy config.example.json config.json
 | 想干什么 | 命令 |
 | -------- | ---- |
 | 昨晚到底成没成（一句话） | `python spark.py --status` |
+| 今晚还能不能跑（体检） | `python spark.py --doctor` |
 | 演练（不真发） | `python spark.py --dry-run` |
 | 立刻补发（无视时间窗） | `python spark.py --force` |
 | 登录态失效后重新登录 | `python login.py --manual` |
@@ -126,7 +127,7 @@ schtasks /Create /TN douyin-spark-check /SC DAILY /ST 01:45 /TR ^
 
 ## 已知限制
 
-- **页面改版会让选择器失效**：扫聊天列表靠四条策略（CSS 类名 → 文本特征 → 火焰图标 → 结构兜底），其中只有一条锚定混淆类名；改版通常先打掉前两条，靠后两条与视觉兜底救场。
+- **页面改版会让选择器失效**：扫聊天列表靠四条策略（CSS 类名 → 文本特征 → 火焰图标 → 结构兜底），其中只有一条锚定混淆类名；改版通常先打掉前两条，靠后两条与视觉兜底救场。真遇上改版，按 [页面锚点对照表](docs/ui-map.md) 一条条换，不用通读 1500 行的 `sender.py`。
 - **滑块/行为验证码不处理**：只伪装自动化特征，绝不碰验证码，撞到就退避等下一晚。
 - **不做协议逆向**：火花天数走 WebSocket 二进制 protobuf，硬啃是军备竞赛，本项目天花板是"把 UI 操作做稳"。
 - **Windows 只是能用，不是验证过的生产环境**：2026-11-20 在本机 Windows 上跑过 `spark.py --dry-run` 演练（浏览器真的起来、打开抖音聊天页、判未登录、按退出码 2 收场），但整套链路的生产验证仍在 Linux 板子上做。Windows 上没有 Xvfb，有头模式直接用桌面会话（`display` 留空）。
@@ -148,12 +149,13 @@ src/spark_status.py  火花天数识别：CSS 类名 → 文本特征 → 火焰
 src/sender.py        发送与确认：表情面板、文字、几何点击、新增气泡判定
 src/self_heal.py     错误分类 → 恢复动作 → 告警
 src/status.py        一句话状态：最近一夜发了几个、失败在哪、下一步查什么
+src/doctor.py        体检：今晚能不能跑（配置语义/登录态年龄/cron/显示/时区/磁盘/锁）
 src/health_check.py  次日巡检（CLI，也是告警出口）
 tools/               自检入口 verify.py + 诊断脚本：策略直方图、任务看门狗、协议嗅探金丝雀
 tests/               全量 `pytest -q`，不开浏览器、不碰真账号（耗时看末行）
 ```
 
-依赖是单向的：`logutil` / `src.config` / `src.perf` 是底座，`src.scheduler` 只往下调，兄弟模块之间互不 import（23 个模块，零循环依赖）。
+依赖是单向的：`logutil` / `src.config` / `src.perf` 是底座，`src.scheduler` 只往下调，兄弟模块之间互不 import（24 个模块，零循环依赖）。
 
 ## 文档
 
@@ -165,6 +167,7 @@ README 只放主干，细节都在 `docs/`：
 | 人 | [docs/configuration.md](docs/configuration.md) | 全部配置字段、环境变量、登录凭据从哪里读 |
 | 人 | [docs/deployment.md](docs/deployment.md) | 部署到 Linux 机器、cron、低配机内存优化 |
 | 人 | [docs/operations.md](docs/operations.md) | 退出码、每日巡检、登录管理、时区与 FAQ |
+| **Agent** | [docs/ui-map.md](docs/ui-map.md) | **页面改版对照表**：哪个字/类名/像素变了该改哪一行、改完怎么验 |
 | 人 | [docs/self-heal.md](docs/self-heal.md) | 自愈机制：错误分类、恢复策略表、告警 |
 | 人 | [docs/development.md](docs/development.md) | 跑测试、lint、本地开发、提 PR 前自检 |
 | Agent | [AGENTS.md](AGENTS.md) | 仓库地图、命令清单、改动约定（给 AI/自动化代理看的） |

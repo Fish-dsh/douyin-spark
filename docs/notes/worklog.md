@@ -20,6 +20,16 @@
 
 ## 会话时间线
 
+- **2026-11-22 · 会话 68（给 Agent 的第三块：--doctor 体检 + 页面锚点对照表）**：
+① 起点=用户「从对 Agent 友好的角度继续优化」。上一轮的结论是缺三样：装要一条命令（`install.sh`）、状态要一句话（`--status`）、故障要有下一步。这一轮补前两样各自缺的第三块：`--status` 只看**已经发生的事**，没人回答「**下次还会不会跑**」。于是 `spark.py --doctor`。三个检查各管一段，分工写进了 operations.md 的表：`install.sh --check` 管装齐没有，`--doctor` 管**现在**能不能跑，`health_check` 管**昨晚**成没成。
+② `src/doctor.py`（新增）：七类前提 —— 配置语义（`accounts` 空不空 / 窗口与档位格式）、每个账号的登录态年龄（30 天预警线，cookie 37 天过期且会被抖音踢）、cron 里有没有 `run_cron`、`headless` 与 X 显示 socket、时区是否 +08:00、磁盘、上一轮单实例锁是否残留。**每条 fail 的 `fix` 必须是一条能直接照做的命令**，不是解释（`crontab -e 加一行: 0 0 * * * <BASE_DIR>/run_cron.sh`）。只读纪律同 `--status`：不写 `spark.log`、不推告警、不起浏览器，所以随时能跑；`warn` 不阻断当夜，只有 `fail` 让退出码变 1。
+③ 三处判断值得记：**cron 检查不能只看 `crontab -l`** —— `ssh orangepi` 落地常是 root，而任务装在 orangepi 用户下，只看当前用户会误判「没装」，所以把 `/var/spool/cron/crontabs`、`/var/spool/cron`、`/etc/cron.d` 的原文一起收；**`accounts` 为空必须是 fail 不是 warn** —— 2026-11-02 静默断火一整晚就是这个形状（脚本「成功」发了 0 个人）；**陈旧锁不算故障** —— `PID_STALE_SEC=3h` 之后 `pid_alive` 为假就自动接管，报 ok 时说「随时可以手动跑」。
+④ `spark.py` 的分流改成表驱动：`_QUERY = {"--status": "status", "--doctor": "doctor"}`，在 import `scheduler` **之前**走 `__import__(f"src.{module}")`，查询路径不加载 playwright。
+⑤ `docs/ui-map.md`（新增，用户 m04373 后认定的最高优先缺口）：先扫出全仓 147 处页面锚点（DOM 类名 39 / 中文文案 29 / 结构与几何阈值 70 / 纯图像特征 9），再按「症状（grep 得到的日志原话）→ 位置 → 现在锚的是什么 → 改法」重组成 9 组（登录态 / 列表就绪 / 火花四策略 / 打开会话与身份核对 / 输入框与发送键 / 已发送确认 / 表情面板 / 视觉兜底 / 错误分类）。**不照抄 147 行**：同一个 `conversationConversationItemwrapper` 在四个策略里各锚一次，合并成一行才有用。开头写清「表里没有的页面依赖 = 代码里也没有」和「加兜底不要换掉旧的」，结尾写「改版后的排查顺序」与「不要动的东西」（视口 800×600、四策略顺序、CV 双红区间、身份核对「读不到就放行」、发送键排除词）。最后一组是关键耦合：`src/recovery.py` 锚的是**我们自己写的报错文案**，改上方任何一条措辞它就可能认不得 → 归 `UNKNOWN` → 只告警不重试。
+⑥ 踩坑两条：`offset = now.utcoffset() or now.astimezone().utcoffset()` 是错的 —— `timedelta(0)` 是 falsy，UTC 机器的 0 偏移会被当成「没有偏移」再绕回本机时区，于是漏报；改成显式判 `None`。`tests/test_perf.py` 的「裸 `timeout=<数字>`」AST 守卫白名单只有 `health_check.py`，doctor 的 `subprocess.run(timeout=10)` 会失败 —— **没有改白名单**，改成模块常量 `_CMD_TIMEOUT_SEC` 传进去（AST 只抓 `Constant`），守卫的表达力保留。
+⑦ 验证：本机 **694 passed, 1 skipped**（665 → +29，`tests/test_doctor.py` 29 例）；`ruff check` All checks passed、`format --check` 79 files；`ruff.toml` 给 `src/doctor.py` 加 `DTZ005/DTZ007`（config 里的 `HH:MM` 按本地时刻解析，与 `run_cron` 的窗口判定同口径）。文档同步四处：README（常用命令加体检行、代码地图加 `src/doctor.py`、模块数 24、文档表加 ui-map、已知限制第一条指向锚点表）、operations.md「先看状态、再看前提」+ 三检查分工表、architecture.md 模块表、AGENTS.md（命令 + 归属表 + 「改锚点必须同轮改 ui-map」）。
+⑧ 待上板：doctor 只在 Windows 上验过（win32 分支 skip cron/显示检查），板端要真跑一次 `spark.py --doctor` 看 cron 与 X socket 两项是否报 ok。
+
 - **2026-11-22 · 会话 67（给 Agent 的合约：--status / install.sh / 退出码怎么办）**：
 ① 起点=用户问「为什么没人用」，随后把方向拨到「可以交给 WorkBuddy 这种 agent」。结论是 Agent 只吃得掉「装」这一步，顶不住的是机器（要 24h 开机的 Linux）、登录（必须人扫码、37 天过期还会被踢）、出事（第 30 天才会遇到的页面改版/网络假死，那时 Agent 早走了）。**缺的不是 Agent 能力，是给 Agent 的合约**：装要一条命令、状态要一句话、故障要有下一步。这三样恰好也是给未来自己的入口。
 ② `spark.py --status`（新增 `src/status.py`）：只读 `spark.log`（含轮转）与 `heartbeat.json`，输出「今天凌晨(2026-11-22) 那一轮: 发送 8 / 8, 失败 0 / main 3/3 · 17264207155 5/5 ｜ 耗时 5m30.0s」。失败逐条带原因（`处理失败(本地策略: 重试)` → 「本地策略: 重试」），再按原因给建议（登录态失效→login.py 扫码、重试/未确认→看当晚截图）。`--json` 给程序读。三条取舍：**不写日志**（会污染 01:45 巡检的「当日收尾」判定，同周报纪律）、**退出码恒 0**（它回答「怎么样了」不是「成没成」，不能污染 run_cron 的 rc 协议）、**不调 load_config**（它会 log，只把 config.json 当纯文本读窗口）。

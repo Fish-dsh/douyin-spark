@@ -50,6 +50,7 @@ cron 01:45 ──► src/health_check.py：日期 / 收尾 / 有头配置 / Xvfb
 | `src/self_heal.py` | 自愈门面：错误分类 → 本地恢复策略 → 告警（零 API） |
 | `src/recovery.py` | 纯函数决策表（无依赖，便于单测） |
 | `src/status.py` | 一句话状态（`spark.py --status`）：只读日志与心跳，回答"最近一夜发了几个、失败在哪、下一步查什么"。只读纪律同周报——绝不写 `spark.log` |
+| `src/doctor.py` | 体检（`spark.py --doctor`）：回答"下一次还会不会跑"——配置语义、登录态年龄、cron 是否装了、显示 socket、时区、磁盘、单实例锁。只读、不推送、不起浏览器；退出码 0 = 没有 fail（warn 不阻断当夜） |
 | `src/health_check.py` | 每日巡检四件事：state 日期是不是今天、日志里每个账号有没有收尾、`headless`/`display` 配置断言、Xvfb 显示号是否活着（探活用 `_pid_alive`：POSIX 看 `/proc`，Windows 走 `OpenProcess`） |
 | `src/streak_history.py` | 火花历史覆盖门禁（近 3 天该出现的人今天是否还出现） |
 | `src/perf.py` | 三档性能参数表（浏览器参数 + 等待/超时项，可按机器强弱选） |

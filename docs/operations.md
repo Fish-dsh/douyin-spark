@@ -25,9 +25,9 @@
 - `SPARK_PERF_PROFILE` 环境变量只改「等待/超时」，**不改浏览器资源**（后者只读 `config.json`）。两者不一致时启动日志打 `[perf][warn]`。要整体试档请改 `config.json` 的 `perf_profile`。
 - 查看当前档位：`python src/perf.py` 打印三档完整对照表，`python src/perf.py high` 打印该档摘要；运行中看 `runtime/spark.log` 的 `[perf] perf_profile=...` 行。
 
-## 先看状态
+## 先看状态、再看前提
 
-半夜出事、早上验收、改完代码回来看结果 —— 第一件事不是翻日志：
+半夜出事、早上验收、改完代码回来看结果 —— 第一件事不是翻日志。两个只读命令分别回答两个问题：**昨晚怎么样**（`--status`）和**下一次还会不会跑**（`--doctor`）。
 
 ```bash
 python spark.py --status          # 一句话: 昨晚发了 6/8、失败在哪、下一步查什么
@@ -40,6 +40,25 @@ python spark.py --status --json   # 同上, 给脚本 / Agent 读
 
 它也会直说「断了」：最近 7 天没有完整的一夜时，输出「没有完整的一夜」并给出最后
 一次日志的日期，不会把「没数据」说成「正常」。
+
+`--status` 看的是**已经发生的事**；要问「今晚还会不会跑」，用体检：
+
+```bash
+python spark.py --doctor          # 逐项检查, 有 fail 就退 1
+python spark.py --doctor --json   # 给脚本 / Agent 读
+```
+
+它查七类前提：配置语义（`accounts` 空不空、窗口与档位格式）、每个账号的登录态年龄、cron 里有没有 `run_cron`（会读 `/var/spool/cron` 与 `/etc/cron.d`，因为 `ssh orangepi` 落地常是 root 而任务装在 orangepi 用户下）、`headless`/`display` 与 X 显示 socket、机器时区是不是 +08:00、磁盘剩余、上一轮的单实例锁是否残留。
+每条不成文的都附一行 `→` 开头的**可以直接照做的命令**，不是解释。
+
+与另外两个检查的分工：
+| 命令 | 回答 | 什么时候跑 |
+| --- | --- | --- |
+| `install.sh --check` | 装齐了没有（解释器/依赖/浏览器/Xvfb/配置文件） | 部署与升级后 |
+| `spark.py --doctor` | **现在**能不能跑（配置语义/登录态/cron/显示/时区/磁盘/锁） | 任何时候，只读 |
+| `src/health_check.py` | **昨晚**跑成了没有 | cron 01:45，会告警 |
+
+体检**不写 `spark.log`、不推告警、不起浏览器**，所以随时可以跑；`warn` 不阻断当夜，只有 `fail` 让退出码变 1。
 
 ## 时间口径（重要）
 

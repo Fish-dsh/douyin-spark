@@ -29,7 +29,7 @@ douyin-spark/
 ├── src/                               # 全部业务逻辑（见 docs/architecture.md 的模块表）
 ├── tools/                             # 运维脚本，不参与发送主链路（verify.py / import_browser_cookies.py / …）
 ├── tests/                             # pytest 全量测试
-├── docs/                              # architecture / configuration / deployment / operations / self-heal / development
+├── docs/                              # architecture / configuration / deployment / operations / self-heal / development / ui-map
 └── runtime/                           # 运行时生成物（gitignored）
 ```
 
@@ -42,6 +42,8 @@ python tools/verify.py            # 自检四步：语法 -> JS 语法 -> lint -
 python tools/verify.py --fast     # 同上但跳过单测（pre-push 用的就是这个）
 python -m pytest tests -q         # 只跑单测
 python -m ruff check .            # 只跑静态检查
+python spark.py --status          # 昨晚怎么样（只读日志与心跳）
+python spark.py --doctor          # 今晚能不能跑（只读七项前提，有 fail 退 1）
 python spark.py --dry-run         # 演练：只走定位链路，不真发
 ./run_dev.sh --dry-run            # 本地开发（runtime-dev/，不碰正式账本）
 powershell -File run_cron.ps1     # Windows 侧手动跑一次定时入口
@@ -52,6 +54,8 @@ python -m src.weekly_report       # 周报（只读日志）
 ## 改动约定
 
 - 改完跑 `python tools/verify.py`（退出码 0 才算过；2 = 缺工具没验证到，不是通过）；涉及 DOM 选择的改动，说明清楚用哪条策略兜底。
+- **改任何页面选择器 / 文案锚点 / 几何阈值，同一轮更新 `docs/ui-map.md`**（行号与锚点原文）。那张表是「没有 UI 的 Agent」唯一能看见抖音页面长什么样的地方；表落后于代码，下一次改版就会按错的表去改。
+- 改 `src/recovery.py` 之外的报错措辞时回头看 `src/recovery.py`：它按日志里的词分类（未找到/超时/未登录/内存）。新措辞它认不得就归 `UNKNOWN` → 只告警不重试，当晚直接放弃。
 - 新增等待/超时不要写字面量，加到 `src/perf.py` 的 `_SPECS`，由 `perf_profile` 统管（可用 `SPARK_PERF_<KNOB>` 临时覆盖）。
 - 新增配置字段要同时改：`config.example.json`、`src/config.py`、`docs/configuration.md`；改运行时机还要改 `docs/operations.md` 的四方一致那节。
 - 日志用中文、面向"明天早上看日志的人"；机器读的内容一律进 `src/events.py` 的 JSONL，不要混进日志。
@@ -66,6 +70,7 @@ python -m src.weekly_report       # 周报（只读日志）
 | 配置字段、环境变量、凭据来源 | `docs/configuration.md` |
 | 部署、cron、低配机调优 | `docs/deployment.md` |
 | 退出码、巡检、登录管理、FAQ | `docs/operations.md` |
+| 页面锚点：哪个字/类名/像素变了该改哪一行 | `docs/ui-map.md` |
 | 自愈策略与告警 | `docs/self-heal.md` |
 | 测试、lint、提交前自检 | `docs/development.md` |
 | 会话时间线、挂起事项、每个决定为什么这么定 | `docs/notes/worklog.md` |
