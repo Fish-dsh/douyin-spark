@@ -29,6 +29,8 @@ ignore = [
 "src/vision.py" = ["DTZ005"]
 # "最近一夜"按机器本地自然日划分, 与 spark.log 时间戳同口径
 "src/status.py" = ["DTZ005"]
+# 体检把 config 里的 "HH:MM" 当本地时刻解析, 与 run_cron 的窗口判定同口径
+"src/doctor.py" = ["DTZ005", "DTZ007"]
 "health_check.py" = ["DTZ005"]
 # 日志按天分桶用机器本地日期: 与 spark.log 时间戳同口径
 "strat_stats.py" = ["DTZ005"]
