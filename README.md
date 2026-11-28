@@ -38,7 +38,7 @@
 Linux：
 
 ```bash
-git clone <this-repo> douyin-spark && cd douyin-spark
+git clone https://github.com/Fish-dsh/douyin-spark.git && cd douyin-spark
 
 ./install.sh                                   # 解释器/依赖/浏览器/Xvfb/配置, 幂等, 缺什么直接说
 
@@ -54,7 +54,7 @@ git clone <this-repo> douyin-spark && cd douyin-spark
 Windows（PowerShell，命令把 `/` 换成 `\`、`.venv/bin/` 换成 `.venv\Scripts\`）：
 
 ```powershell
-git clone <this-repo> douyin-spark; cd douyin-spark
+git clone https://github.com/Fish-dsh/douyin-spark.git douyin-spark; cd douyin-spark
 
 py -3 -m venv .venv
 .venv\Scripts\pip install -r requirements.txt
